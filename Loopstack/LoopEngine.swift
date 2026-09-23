@@ -1233,7 +1233,9 @@ final class LoopEngine: ObservableObject {
   }
 
   private func playLoop(_ player: AVAudioPlayerNode, _ buffer: AVAudioPCMBuffer, restart: Bool) {
-    guard engine.isRunning, buffer.frameLength > 0, format.sampleRate >= 8000 else { return }
+    // Layer FX players are never attached (loops render through LiveLayers now);
+    // scheduling on a detached player throws an ObjC exception and kills the app.
+    guard player.engine != nil, engine.isRunning, buffer.frameLength > 0, format.sampleRate >= 8000 else { return }
     if restart { player.stop() }
     let n = Int(buffer.frameLength)
     let sr = format.sampleRate
@@ -1316,7 +1318,7 @@ final class LoopEngine: ObservableObject {
   }
 
   private func schedule(_ player: AVAudioPlayerNode, _ buffer: AVAudioPCMBuffer, loops: Bool) {
-    guard engine.isRunning, buffer.frameLength > 0, format.sampleRate >= 8000 else { return }
+    guard player.engine != nil, engine.isRunning, buffer.frameLength > 0, format.sampleRate >= 8000 else { return }
     player.scheduleBuffer(buffer, at: nil, options: loops ? .loops : [])
     player.play()
   }
