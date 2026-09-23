@@ -380,7 +380,7 @@ final class LoopEngine: ObservableObject {
   private func applyGains() {
     engine.mainMixerNode.outputVolume = masterGain
     loopsMixer.outputVolume = 1
-    metroMixer.outputVolume = metronomeOn ? metroGain : 0
+    metroMixer.outputVolume = (metronomeOn || status == .countin) ? metroGain : 0
     drumsMixer.outputVolume = drumsOn ? drumsGain : 0
     instMixer.outputVolume = instrumentGain
     instMixer.pan = instrumentPan
@@ -756,13 +756,13 @@ final class LoopEngine: ObservableObject {
       if countInOn {
         status = .countin
         countInBeat = 0
-        cycleStart = CACurrentMediaTime()
+        cycleStart = CACurrentMediaTime() + Self.clickLead
         applyGains()
         rescheduleMetro()
         return
       }
       status = .recording
-      beginCycle()
+      beginCycle(at: CACurrentMediaTime() + Self.clickLead)
       startCapture()
       applyGains()
       return
@@ -1040,8 +1040,12 @@ final class LoopEngine: ObservableObject {
     return url
   }
 
-  private func beginCycle() {
-    cycleStart = CACurrentMediaTime()
+  /// Put beat 0 slightly in the future so the audio thread renders the first click
+  /// from its start; an origin of "now" is already past by the first render.
+  private static let clickLead: TimeInterval = 0.05
+
+  private func beginCycle(at start: TimeInterval? = nil) {
+    cycleStart = start ?? CACurrentMediaTime()
     lastCycleIndex = 0
     liveDrums.cycleStart = cycleStart
     liveDrums.loopDur = loopDuration
@@ -1110,7 +1114,8 @@ final class LoopEngine: ObservableObject {
       countInBeat = min(3, Int(elapsed / MetroTiming.countInDuration(bpm: Double(bpm), beats: 1)))
       if elapsed >= MetroTiming.countInDuration(bpm: Double(bpm)) {
         status = .recording
-        beginCycle()
+        // Start on the count-in grid, not whenever this 50ms tick noticed.
+        beginCycle(at: cycleStart + MetroTiming.countInDuration(bpm: Double(bpm)))
         startCapture()
         applyGains()
       }
@@ -1302,12 +1307,14 @@ final class LoopEngine: ObservableObject {
 
   private func rescheduleMetro() {
     liveMetro.sampleRate = format.sampleRate
-    guard metronomeOn else {
-      liveMetro.stop()
+    if status == .countin {
+      // Count-in clicks even with the metronome off; then it stops after 4 beats.
+      // With the metronome on it keeps looping so recording continues the same click stream.
+      liveMetro.start(bpm: Double(bpm), beats: 4, looping: metronomeOn, origin: cycleStart)
       return
     }
-    if status == .countin {
-      liveMetro.start(bpm: Double(bpm), beats: 4, looping: false, origin: cycleStart)
+    guard metronomeOn else {
+      liveMetro.stop()
       return
     }
     if status == .armed || status == .recording || capturing {

@@ -29,13 +29,22 @@ final class LiveMetro: @unchecked Sendable {
   /// Set by stop(): clicks that began before this time ring out instead of being cut
   /// mid-waveform (the crack heard at the record-to-loop handoff).
   private var drainUntil: Double?
+  /// After a resync, clicks that began before this point are skipped rather than
+  /// joined mid-waveform (a partial click is a hard onset).
+  private var resyncFloor = -Double.infinity
 
   func start(bpm: Double, beats: Int, looping: Bool, origin: TimeInterval) {
     lock.lock()
     self.bpm = max(40, bpm)
     self.beats = max(1, beats)
     self.looping = looping
-    if origin != self.origin || (!enabled && drainUntil == nil) { playhead = nil }
+    // While running, re-express the playhead against the new origin so the click
+    // stream continues without a resync (count-in flows straight into recording).
+    if let p = playhead, enabled || drainUntil != nil {
+      playhead = p + (self.origin - origin)
+    } else {
+      playhead = nil
+    }
     self.origin = origin
     enabled = true
     drainUntil = nil
@@ -66,7 +75,11 @@ final class LiveMetro: @unchecked Sendable {
     let wall = CACurrentMediaTime() - origin
     // Resync only on start or after a big jump (interruption, route change).
     var t0 = playhead ?? wall
-    if abs(t0 - wall) > 0.08 { t0 = wall }
+    if playhead == nil || abs(t0 - wall) > 0.08 {
+      t0 = wall
+      resyncFloor = wall
+    }
+    let minStart = resyncFloor
     let t1 = t0 + Double(frames) / sr
     playhead = t1
     lock.unlock()
@@ -95,7 +108,7 @@ final class LiveMetro: @unchecked Sendable {
     while b <= last {
       let bt = Double(b) * beatSec
       if bt >= t1 || bt >= stopAt { break }
-      if looping || b < beats, bt + clickSec > t0 {
+      if looping || b < beats, bt + clickSec > t0, bt >= minStart {
         let down = b % 4 == 0
         let freq = down ? 1320.0 : 880.0
         let amp: Float = down ? 0.55 : 0.32
