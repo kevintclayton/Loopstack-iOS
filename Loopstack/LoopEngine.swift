@@ -292,7 +292,7 @@ final class LoopEngine: ObservableObject {
     do {
       let session = AVAudioSession.sharedInstance()
       try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP, .mixWithOthers])
-      try session.setPreferredIOBufferDuration(0.02)
+      try session.setPreferredIOBufferDuration(0.01)
       try session.setActive(true)
       let sr = session.sampleRate >= 8000 ? session.sampleRate : 44100
       format = AVAudioFormat(standardFormatWithSampleRate: sr, channels: 2)!
