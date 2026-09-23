@@ -26,22 +26,30 @@ final class LiveMetro: @unchecked Sendable {
   /// Re-reading the wall clock every callback made windows overlap when callbacks
   /// arrived early, so parts of a click were rendered twice (heard as an echo).
   private var playhead: Double?
+  /// Set by stop(): clicks that began before this time ring out instead of being cut
+  /// mid-waveform (the crack heard at the record-to-loop handoff).
+  private var drainUntil: Double?
 
   func start(bpm: Double, beats: Int, looping: Bool, origin: TimeInterval) {
     lock.lock()
     self.bpm = max(40, bpm)
     self.beats = max(1, beats)
     self.looping = looping
-    if origin != self.origin || !enabled { playhead = nil }
+    if origin != self.origin || (!enabled && drainUntil == nil) { playhead = nil }
     self.origin = origin
     enabled = true
+    drainUntil = nil
     lock.unlock()
   }
 
   func stop() {
     lock.lock()
+    if enabled, let p = playhead {
+      drainUntil = p
+    } else if drainUntil == nil {
+      playhead = nil
+    }
     enabled = false
-    playhead = nil
     lock.unlock()
   }
 
@@ -50,6 +58,7 @@ final class LiveMetro: @unchecked Sendable {
     AudioBuf.zero(list, frames: frames)
     lock.lock()
     let on = enabled
+    let drain = drainUntil
     let sr = max(sampleRate, 8000)
     let bpm = self.bpm
     let beats = self.beats
@@ -61,9 +70,18 @@ final class LiveMetro: @unchecked Sendable {
     let t1 = t0 + Double(frames) / sr
     playhead = t1
     lock.unlock()
-    guard on else { return }
     let beatSec = MetroTiming.beatSec(bpm: bpm)
     let clickSec = 0.04
+    if !on {
+      guard let drain else { return }
+      if t0 >= drain + clickSec {
+        lock.lock()
+        if drainUntil == drain { drainUntil = nil; playhead = nil }
+        lock.unlock()
+        return
+      }
+    }
+    let stopAt = on ? Double.infinity : (drain ?? 0)
     if !looping, t0 >= Double(beats) * beatSec + clickSec {
       lock.lock()
       enabled = false
@@ -76,7 +94,7 @@ final class LiveMetro: @unchecked Sendable {
     let last = looping ? b + beats + 4 : beats - 1
     while b <= last {
       let bt = Double(b) * beatSec
-      if bt >= t1 { break }
+      if bt >= t1 || bt >= stopAt { break }
       if looping || b < beats, bt + clickSec > t0 {
         let down = b % 4 == 0
         let freq = down ? 1320.0 : 880.0
