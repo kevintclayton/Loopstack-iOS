@@ -71,6 +71,7 @@ final class LiveLayers: @unchecked Sendable {
     }
     if recWritten >= n {
       recording = false
+      declick(recIndex, length: n)
       slots[recIndex].active = true
       slots[recIndex].playhead = 0
       complete = true
@@ -83,11 +84,27 @@ final class LiveLayers: @unchecked Sendable {
     // punchIn already started playback when the take filled; resetting the playhead
     // again here (up to one UI tick later) jumped the loop back to 0 and tore.
     if activate, slots.indices.contains(recIndex), !slots[recIndex].active {
+      declick(recIndex, length: recWritten)
       slots[recIndex].active = true
       slots[recIndex].playhead = 0
     }
     complete = activate
     lock.unlock()
+  }
+
+  /// Short fade at both ends of a take so the first entry and every wrap
+  /// start and end near zero instead of jumping mid-waveform. Call with lock held.
+  private func declick(_ i: Int, length: Int) {
+    let len = min(length, slots[i].left.count, slots[i].right.count)
+    let f = min(128, len / 4)
+    guard f > 1 else { return }
+    for k in 0..<f {
+      let g = Float(k) / Float(f)
+      slots[i].left[k] *= g
+      slots[i].right[k] *= g
+      slots[i].left[len - 1 - k] *= g
+      slots[i].right[len - 1 - k] *= g
+    }
   }
 
   func consumeComplete() -> Bool {
