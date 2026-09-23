@@ -62,10 +62,11 @@ enum AudioGraph {
     }
   }
 
-  static func layersNode(format: AVAudioFormat, layers: LiveLayers) -> AVAudioSourceNode {
+  static func layerNode(format: AVAudioFormat, layers: LiveLayers, slot: Int) -> AVAudioSourceNode {
     let layers = layers
+    let slot = slot
     return AVAudioSourceNode(format: format) { _, _, frameCount, abl -> OSStatus in
-      layers.render(frames: Int(frameCount), list: abl)
+      layers.render(slot: slot, frames: Int(frameCount), list: abl)
       return noErr
     }
   }

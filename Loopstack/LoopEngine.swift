@@ -13,16 +13,11 @@ enum MicState: String {
 
 final class LayerSlot {
   let index: Int
-  let player = AVAudioPlayerNode()
-  let mixer = AVAudioMixerNode()
-  let delayPlayer = AVAudioPlayerNode()
-  let reverbPlayer = AVAudioPlayerNode()
-  let delaySend = AVAudioMixerNode()
-  let reverbSend = AVAudioMixerNode()
+  /// Renders this loop; fanned out to the loops mixer and the loop delay/reverb buses.
+  var node: AVAudioSourceNode?
+  var delayBus: AVAudioNodeBus = 0
+  var reverbBus: AVAudioNodeBus = 0
   var busy = false
-  var fxPrimed = false
-
-  var players: [AVAudioPlayerNode] { [player, delayPlayer, reverbPlayer] }
 
   init(index: Int) { self.index = index }
 }
@@ -262,7 +257,6 @@ final class LoopEngine: ObservableObject {
   private let liveDrums = LiveDrums()
   private var drumNode: AVAudioSourceNode?
   private let liveLayers = LiveLayers()
-  private var layersNode: AVAudioSourceNode?
   private let liveMetro = LiveMetro()
   private var metroNode: AVAudioSourceNode?
   private let liveSampler = LiveSampler()
@@ -335,10 +329,11 @@ final class LoopEngine: ObservableObject {
     engine.connect(loopDelay, to: main, format: format)
     engine.connect(loopReverbBus, to: loopReverb, format: format)
     engine.connect(loopReverb, to: main, format: format)
-    loopDelay.wetDryMix = 0
+    // The buses carry only per-loop sends, so the effects run fully wet.
+    loopDelay.wetDryMix = 100
     loopDelay.feedback = 28
     loopDelay.delayTime = 0.3
-    loopReverb.wetDryMix = 0
+    loopReverb.wetDryMix = 100
     loopReverb.loadFactoryPreset(.mediumHall)
     instDelay.wetDryMix = 0
     instDelay.feedback = 20
@@ -361,12 +356,19 @@ final class LoopEngine: ObservableObject {
     synthNode = node
     AudioGraph.installPostTap(on: instPost, format: format, layers: liveLayers)
     tapInstalled = true
-    let lnode = AudioGraph.layersNode(format: format, layers: liveLayers)
-    engine.attach(lnode)
-    engine.connect(lnode, to: loopsMixer, format: format)
-    layersNode = lnode
     for i in 0..<8 {
-      layerSlots.append(LayerSlot(index: i))
+      let slot = LayerSlot(index: i)
+      let node = AudioGraph.layerNode(format: format, layers: liveLayers, slot: i)
+      engine.attach(node)
+      let dry = AVAudioConnectionPoint(node: loopsMixer, bus: loopsMixer.nextAvailableInputBus)
+      let delay = AVAudioConnectionPoint(node: loopDelayBus, bus: loopDelayBus.nextAvailableInputBus)
+      let reverb = AVAudioConnectionPoint(node: loopReverbBus, bus: loopReverbBus.nextAvailableInputBus)
+      engine.connect(node, to: [dry, delay, reverb], fromBus: 0, format: format)
+      slot.node = node
+      slot.delayBus = delay.bus
+      slot.reverbBus = reverb.bus
+      setSends(slot, delay: 0, reverb: 0)
+      layerSlots.append(slot)
     }
 
     applyGains()
@@ -789,10 +791,8 @@ final class LoopEngine: ObservableObject {
     captureSlot = nil
     capturing = false
     for layer in layers {
-      layer.slot.delaySend.outputVolume = 0
-      layer.slot.reverbSend.outputVolume = 0
+      setSends(layer.slot, delay: 0, reverb: 0)
       layer.slot.busy = false
-      layer.slot.fxPrimed = false
     }
     layers = []
     loopLocked = false
@@ -925,7 +925,6 @@ final class LoopEngine: ObservableObject {
     if let i = layers.firstIndex(where: { $0.id == id }) {
       layers[i].delay = delay
       applyLayerMix(layers[i])
-      if delay > 0.01 { primeLayerFx(layers[i]) }
     }
   }
 
@@ -933,7 +932,6 @@ final class LoopEngine: ObservableObject {
     if let i = layers.firstIndex(where: { $0.id == id }) {
       layers[i].reverb = reverb
       applyLayerMix(layers[i])
-      if reverb > 0.01 { primeLayerFx(layers[i]) }
     }
   }
 
@@ -954,8 +952,8 @@ final class LoopEngine: ObservableObject {
     guard let i = layers.firstIndex(where: { $0.id == id }) else { return }
     let idx = layers[i].slot.index
     liveLayers.clear(index: idx)
+    setSends(layers[i].slot, delay: 0, reverb: 0)
     layers[i].slot.busy = false
-    layers[i].slot.fxPrimed = false
     layers.remove(at: i)
     if layers.isEmpty {
       loopLocked = false
@@ -965,6 +963,14 @@ final class LoopEngine: ObservableObject {
 
   private func applyLayerMix(_ layer: Layer) {
     liveLayers.setMix(index: layer.slot.index, gain: layer.gain, pan: layer.pan, muted: layer.muted)
+    setSends(layer.slot, delay: layer.delay, reverb: layer.reverb)
+  }
+
+  /// Post-fader sends: the node output already has the loop's gain, pan and mute.
+  private func setSends(_ slot: LayerSlot, delay: Float, reverb: Float) {
+    guard let node = slot.node else { return }
+    node.destination(forMixer: loopDelayBus, bus: slot.delayBus)?.volume = min(1, max(0, delay))
+    node.destination(forMixer: loopReverbBus, bus: slot.reverbBus)?.volume = min(1, max(0, reverb))
   }
 
   func startSessionRecord() {
@@ -1158,7 +1164,6 @@ final class LoopEngine: ObservableObject {
     guard captureSlot == nil else { return }
     guard let slot = layerSlots.first(where: { !$0.busy }) else { return }
     slot.busy = true
-    slot.fxPrimed = false
     captureSlot = slot
     let n = max(1, Int((loopDuration * format.sampleRate).rounded()))
     liveLayers.setClock(start: cycleStart, dur: loopDuration, sampleRate: format.sampleRate)
@@ -1226,34 +1231,6 @@ final class LoopEngine: ObservableObject {
         live.setReverse(index: index, buffer: reversed)
       }
     }
-  }
-
-  private func primeLayerFx(_ layer: Layer) {
-    guard !layer.slot.fxPrimed else { return }
-    layer.slot.fxPrimed = true
-    guard running else { return }
-    let buf = layer.reversed ? layer.reverseBuffer : layer.buffer
-    playLoop(layer.slot.delayPlayer, buf, restart: false)
-    playLoop(layer.slot.reverbPlayer, buf, restart: false)
-  }
-
-  private func playLoop(_ player: AVAudioPlayerNode, _ buffer: AVAudioPCMBuffer, restart: Bool) {
-    // Layer FX players are never attached (loops render through LiveLayers now);
-    // scheduling on a detached player throws an ObjC exception and kills the app.
-    guard player.engine != nil, engine.isRunning, buffer.frameLength > 0, format.sampleRate >= 8000 else { return }
-    if restart { player.stop() }
-    let n = Int(buffer.frameLength)
-    let sr = format.sampleRate
-    let dur = max(loopDuration, 0.001)
-    let into = max(0, (CACurrentMediaTime() - cycleStart).truncatingRemainder(dividingBy: dur))
-    let offset = min(n - 64, max(0, Int((into * sr).rounded())))
-    if offset > Int(sr * 0.012), let tail = AudioDSP.slice(buffer, from: offset) {
-      player.scheduleBuffer(tail, at: nil, options: [])
-      player.scheduleBuffer(buffer, at: nil, options: .loops)
-    } else {
-      player.scheduleBuffer(buffer, at: nil, options: .loops)
-    }
-    if !player.isPlaying { player.play() }
   }
 
   private func onLoopBoundary() {

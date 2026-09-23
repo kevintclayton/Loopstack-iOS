@@ -180,7 +180,9 @@ final class LiveLayers: @unchecked Sendable {
     lock.unlock()
   }
 
-  func render(frames: Int, list: UnsafeMutablePointer<AudioBufferList>) {
+  /// Renders one slot. Each loop has its own source node so the engine can give it
+  /// its own delay/reverb send levels.
+  func render(slot si: Int, frames: Int, list: UnsafeMutablePointer<AudioBufferList>) {
     let buffers = UnsafeMutableAudioBufferListPointer(list)
     guard frames > 0, let data = buffers.first?.mData else { return }
     let outL = data.assumingMemoryBound(to: Float.self)
@@ -192,23 +194,21 @@ final class LiveLayers: @unchecked Sendable {
     }()
     AudioBuf.zero(list, frames: frames)
     lock.lock()
-    for si in slots.indices {
-      guard slots[si].active, !slots[si].muted, slots[si].n > 1 else { continue }
-      let n = slots[si].n
-      let a = slots[si].reversed && slots[si].revL.count == n ? slots[si].revL : slots[si].left
-      let b = slots[si].reversed && slots[si].revR.count == n ? slots[si].revR : slots[si].right
-      guard a.count == n, b.count == n else { continue }
-      let gl = slots[si].gain * min(1, max(0, 1 - slots[si].pan))
-      let gr = slots[si].gain * min(1, max(0, 1 + slots[si].pan))
-      var head = slots[si].playhead
-      for i in 0..<frames {
-        let idx = head % n
-        outL[i] += a[idx] * gl
-        if outR != outL { outR[i] += b[idx] * gr }
-        head += 1
-      }
-      slots[si].playhead = head
+    defer { lock.unlock() }
+    guard slots.indices.contains(si), slots[si].active, !slots[si].muted, slots[si].n > 1 else { return }
+    let n = slots[si].n
+    let a = slots[si].reversed && slots[si].revL.count == n ? slots[si].revL : slots[si].left
+    let b = slots[si].reversed && slots[si].revR.count == n ? slots[si].revR : slots[si].right
+    guard a.count == n, b.count == n else { return }
+    let gl = slots[si].gain * min(1, max(0, 1 - slots[si].pan))
+    let gr = slots[si].gain * min(1, max(0, 1 + slots[si].pan))
+    var head = slots[si].playhead
+    for i in 0..<frames {
+      let idx = head % n
+      outL[i] += a[idx] * gl
+      if outR != outL { outR[i] += b[idx] * gr }
+      head += 1
     }
-    lock.unlock()
+    slots[si].playhead = head
   }
 }
