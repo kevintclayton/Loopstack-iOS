@@ -1577,20 +1577,21 @@ final class LiveSynth: @unchecked Sendable {
     var zR = lpZR
     var dcl = dcBlockL
     var dcr = dcBlockR
+    let out = 0.92 * Self.makeup(preset)
     for f in 0..<frames {
       var x = Double(left[f])
       x -= dcl
       dcl += 0.0004 * x
       let y = zL + g * (tanh(x - fb * zL) - zL)
       zL = y
-      left[f] = Float(tanh(y * 1.15) * 0.92)
+      left[f] = Float(tanh(y * 1.15) * out)
       if right != left {
         var xr = Double(right[f])
         xr -= dcr
         dcr += 0.0004 * xr
         let yr = zR + g * (tanh(xr - fb * zR) - zR)
         zR = yr
-        right[f] = Float(tanh(yr * 1.15) * 0.92)
+        right[f] = Float(tanh(yr * 1.15) * out)
       }
     }
     lpZ = zL
@@ -1608,6 +1609,16 @@ final class LiveSynth: @unchecked Sendable {
     case .pluck: return 1.0
     case .pad: return 1.46
     case .noise: return 1.18
+    }
+  }
+
+  /// Clean gain after the saturator, so level changes don't change the tone.
+  /// Keys and pluck sat ~9 dB under bass/pad/drums; this seats them at a similar level.
+  private static func makeup(_ preset: InstrumentPreset) -> Double {
+    switch preset {
+    case .keys: return 2.0    // +6 dB
+    case .pluck: return 2.8   // +9 dB
+    case .bass, .pad, .noise: return 1.0
     }
   }
 
