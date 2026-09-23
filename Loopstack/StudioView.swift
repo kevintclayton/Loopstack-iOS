@@ -10,6 +10,10 @@ struct StudioView: View {
       LS.bg.ignoresSafeArea()
       if engine.unlocked {
         desk
+          .background(HardwareTypingView(
+            onDown: { engine.typingDown($0) },
+            onUp: { engine.typingUp($0) }
+          ))
       } else {
         GateView { engine.unlock() }
       }
@@ -28,8 +32,8 @@ struct StudioView: View {
       VStack(alignment: .leading, spacing: 16) {
         header
         TransportView(engine: engine)
-        LayersView(engine: engine)
         InstrumentView(engine: engine)
+        LayersView(engine: engine)
         DrumsView(engine: engine)
         MixView(engine: engine)
         SessionView(engine: engine, share: { shareURL = $0 })
@@ -70,19 +74,20 @@ struct StudioView: View {
 struct GateView: View {
   var onStart: () -> Void
   var body: some View {
-    VStack(spacing: 16) {
+    VStack(spacing: 0) {
+      Spacer()
       Text("AUDIO ROOM")
         .font(.system(size: 11, weight: .medium))
-        .tracking(2.4)
+        .tracking(3)
         .foregroundStyle(LS.subtle)
       Text("Loopstack")
-        .font(.system(size: 48, weight: .semibold))
+        .font(.system(size: 52, weight: .semibold))
         .foregroundStyle(LS.fg)
-      Text("A layered looper with a metronome, overdubs you can see and delete, and drum loops that lock to the start of your cycle.")
-        .font(.system(size: 16))
-        .foregroundStyle(LS.muted)
-        .multilineTextAlignment(.center)
-        .frame(maxWidth: 360)
+        .padding(.top, 10)
+      LoopstackMark()
+        .frame(width: 168, height: 72)
+        .padding(.top, 28)
+        .allowsHitTesting(false)
       Button(action: onStart) {
         Text("Tap to open")
           .font(.system(size: 15, weight: .medium))
@@ -91,9 +96,41 @@ struct GateView: View {
           .padding(.horizontal, 32)
           .background(LS.fg, in: Capsule())
       }
-      .padding(.top, 16)
+      .buttonStyle(.plain)
+      .padding(.top, 28)
+      Spacer()
     }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .contentShape(Rectangle())
+    .onTapGesture(perform: onStart)
     .padding(24)
+  }
+}
+
+struct LoopstackMark: View {
+  @State private var playhead: CGFloat = 0
+  private let width: CGFloat = 168
+  private let height: CGFloat = 72
+  var body: some View {
+    let barH: CGFloat = 13
+    let gap: CGFloat = 8
+    ZStack(alignment: .leading) {
+      VStack(spacing: gap) {
+        Capsule().fill(LS.accent.opacity(0.85)).frame(height: barH)
+        Capsule().fill(LS.fg.opacity(0.9)).frame(height: barH)
+        Capsule().fill(LS.accent.opacity(0.7)).frame(height: barH)
+      }
+      Capsule()
+        .fill(LS.record)
+        .frame(width: 5, height: height)
+        .offset(x: 8 + playhead * (width - 21))
+    }
+    .frame(width: width, height: height)
+    .onAppear {
+      withAnimation(.easeInOut(duration: 2.6).repeatForever(autoreverses: true)) {
+        playhead = 1
+      }
+    }
   }
 }
 
@@ -296,32 +333,26 @@ struct LayersView: View {
 
 struct InstrumentView: View {
   @ObservedObject var engine: LoopEngine
-  @State private var held: Set<Int> = []
-
-  private let notes: [(midi: Int, label: String, black: Bool)] = {
-    let labels = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-    let black = [false, true, false, true, false, false, true, false, true, false, true, false]
-    return (48...72).map { midi in
-      let i = midi % 12
-      return (midi, labels[i], black[i])
-    }
-  }()
+  @State private var synthOpen = false
+  @State private var saveOpen = false
+  @State private var saveName = ""
 
   var body: some View {
     card {
       HStack {
         VStack(alignment: .leading, spacing: 4) {
-          Text("INPUT")
+          Text("INSTRUMENT")
             .font(.system(size: 11, weight: .medium))
             .tracking(2)
             .foregroundStyle(LS.subtle)
-          Text("Play into the loop")
+          Text("Sound & pads")
             .font(.system(size: 18, weight: .semibold))
             .foregroundStyle(LS.fg)
         }
         Spacer()
         HStack(spacing: 6) {
           pill("Keys", on: engine.inputMode == "keys") { engine.setInputMode("keys") }
+          pill("Sampler", on: engine.inputMode == "sampler") { engine.setInputMode("sampler") }
           pill("Mic", on: engine.inputMode == "mic") { engine.setInputMode("mic") }
         }
       }
@@ -329,12 +360,133 @@ struct InstrumentView: View {
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: 6) {
           ForEach(InstrumentPreset.allCases) { p in
-            pill(p.label, on: engine.preset == p) { engine.setPreset(p) }
+            pill(p.label, on: engine.preset == p && engine.activeSoundId == nil && engine.inputMode != "sampler") {
+              engine.setPreset(p)
+            }
+          }
+          ForEach(engine.savedSounds) { sound in
+            HStack(spacing: 0) {
+              pill(sound.name, on: engine.activeSoundId == sound.id) { engine.loadSound(sound.id) }
+              Button {
+                engine.deleteSound(sound.id)
+              } label: {
+                Image(systemName: "xmark")
+                  .font(.system(size: 9, weight: .bold))
+                  .foregroundStyle(LS.subtle)
+                  .frame(width: 22, height: 36)
+              }
+              .accessibilityLabel("Delete \(sound.name)")
+            }
+            .background(LS.surface2, in: Capsule())
           }
         }
       }
 
+      HStack {
+        Button("Save sound") {
+          saveName = engine.savedSounds.first(where: { $0.id == engine.activeSoundId })?.name ?? ""
+          saveOpen = true
+        }
+        .font(.system(size: 13, weight: .medium))
+        .foregroundStyle(LS.fg)
+        Spacer()
+        if engine.inputMode == "sampler" {
+          Text(engine.hasSample ? "Pads play the take" : "Capture, then play")
+            .font(.system(size: 12))
+            .foregroundStyle(LS.muted)
+        }
+      }
+
+      if engine.inputMode == "sampler" {
+        samplerBlock
+      }
+
       if engine.inputMode == "keys" {
+        synthDisclosure
+      }
+
+      if engine.inputMode == "mic" {
+        micBlock
+      }
+
+      if engine.inputMode != "mic" {
+        KeyPadView(engine: engine)
+      }
+    }
+    .alert("Save sound", isPresented: $saveOpen) {
+      TextField("Name", text: $saveName)
+      Button("Save") { engine.saveCurrentSound(saveName) }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text(engine.inputMode == "sampler"
+           ? "Stores this sample and the current mix."
+           : "Stores the current synth settings.")
+    }
+  }
+
+  private var synthDisclosure: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Button {
+        withAnimation(.easeInOut(duration: 0.18)) { synthOpen.toggle() }
+      } label: {
+        HStack(spacing: 10) {
+          Text("SYNTH")
+            .font(.system(size: 11, weight: .medium))
+            .tracking(1.6)
+            .foregroundStyle(LS.subtle)
+          Text(synthOpen ? "Hide sliders" : "Osc, filter, space")
+            .font(.system(size: 13))
+            .foregroundStyle(LS.muted)
+          Spacer()
+          Image(systemName: "chevron.down")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(LS.muted)
+            .rotationEffect(.degrees(synthOpen ? 180 : 0))
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(synthOpen ? "Hide synth controls" : "Show synth controls")
+
+      if synthOpen {
+        Text("OSC 1")
+          .font(.system(size: 11, weight: .medium))
+          .tracking(1.4)
+          .foregroundStyle(LS.subtle)
+        ScrollView(.horizontal, showsIndicators: false) {
+          HStack(spacing: 6) {
+            ForEach(OscWave.allCases) { w in
+              pill(w.label, on: engine.instrumentWave == w) { engine.setInstrumentWave(w) }
+            }
+          }
+        }
+        Text("OSC 2")
+          .font(.system(size: 11, weight: .medium))
+          .tracking(1.4)
+          .foregroundStyle(LS.subtle)
+        ScrollView(.horizontal, showsIndicators: false) {
+          HStack(spacing: 6) {
+            ForEach(OscWave.allCases) { w in
+              pill(w.label, on: engine.instrumentWave2 == w) { engine.setInstrumentWave2(w) }
+            }
+          }
+        }
+        HStack(spacing: 6) {
+          Text("OCT")
+            .font(.system(size: 11, weight: .medium))
+            .tracking(1.2)
+            .foregroundStyle(LS.subtle)
+          pill("-12", on: engine.osc2Octave == -1) { engine.setOsc2Octave(-1) }
+          pill("0", on: engine.osc2Octave == 0) { engine.setOsc2Octave(0) }
+          pill("+12", on: engine.osc2Octave == 1) { engine.setOsc2Octave(1) }
+        }
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+          FxRow(label: "Mix", value: engine.oscMix, display: "\(Int(engine.oscMix * 100))", onChange: engine.setOscMix)
+          FxRow(label: "Det", value: engine.oscDetune, display: "\(Int(engine.oscDetune * 24))c", onChange: engine.setOscDetune)
+          FxRow(label: "Cut", value: engine.cutoff, display: "\(Int(engine.cutoff * 100))", onChange: engine.setCutoff)
+          FxRow(label: "Q", value: engine.resonance, display: "\(Int(engine.resonance * 100))", onChange: engine.setResonance)
+        }
         FxStrip(
           name: "Keys",
           vol: engine.instrumentGain, pan: engine.instrumentPan,
@@ -347,96 +499,227 @@ struct InstrumentView: View {
         FxRow(label: "Tune", value: Float((engine.instrumentTune - 428) / 24), display: "\(Int(engine.instrumentTune))hz") { v in
           engine.setInstrumentTune(428 + Double(v) * 24)
         }
-        FxRow(label: "Ring", value: engine.instrumentRing, display: "\(Int(engine.instrumentRing * 100))") {
-          engine.setInstrumentRing($0)
-        }
+        FxRow(label: "Ring", value: engine.instrumentRing, display: "\(Int(engine.instrumentRing * 100))", onChange: engine.setInstrumentRing)
       }
+    }
+  }
 
-      if engine.inputMode == "mic" {
-        if engine.micState == .ready {
-          Text("Using iPhone Microphone — Record to capture it into a layer.")
-            .font(.system(size: 14))
-            .foregroundStyle(LS.muted)
-        } else if engine.micState == .denied || engine.micState == .error {
-          Text(engine.micError ?? "Microphone is unavailable. Use the keys instead.")
-            .font(.system(size: 14))
-            .foregroundStyle(LS.muted)
-          Button("Try again") { engine.enableMic() }
-            .foregroundStyle(LS.fg)
-        } else if engine.micState == .pending {
-          Text("Requesting microphone access…")
-            .font(.system(size: 14))
-            .foregroundStyle(LS.muted)
-        } else {
-          Button("Enable microphone") { engine.enableMic() }
-            .font(.system(size: 15, weight: .medium))
-            .foregroundStyle(LS.bg)
-            .frame(height: 44)
-            .padding(.horizontal, 16)
-            .background(LS.fg, in: Capsule())
-        }
-        Toggle("Monitor", isOn: Binding(get: { engine.monitorOn }, set: { engine.setMonitorOn($0) }))
-          .tint(LS.accent)
+  private var samplerBlock: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Text("Speak, play, or plug in a source. Capture writes a sample. Pads play it in the selected key, and loop record captures those hits.")
+        .font(.system(size: 14))
+        .foregroundStyle(LS.muted)
+      if engine.micState == .denied || engine.micState == .error {
+        Text(engine.micError ?? "Microphone is unavailable.")
+          .font(.system(size: 14))
+          .foregroundStyle(LS.muted)
+        Button("Try again") { engine.enableMic() }
           .foregroundStyle(LS.fg)
+      }
+      Button {
+        engine.toggleSampleRecord()
+      } label: {
+        Text(engine.sampleRecording ? "Stop capture" : (engine.hasSample ? "Recapture" : "Capture sample"))
+          .font(.system(size: 15, weight: .medium))
+          .foregroundStyle(engine.sampleRecording ? LS.recordFg : LS.bg)
+          .frame(height: 44)
+          .frame(maxWidth: .infinity)
+          .background(engine.sampleRecording ? LS.record : LS.fg, in: Capsule())
+      }
+      if let err = engine.saveError {
+        Text(err)
+          .font(.system(size: 13))
+          .foregroundStyle(LS.record)
+      }
+      FxStrip(
+        name: "Sample",
+        vol: engine.instrumentGain, pan: engine.instrumentPan,
+        delay: engine.instrumentDelay, reverb: engine.instrumentReverb,
+        onVol: engine.setInstrumentGain, onPan: engine.setInstrumentPan,
+        onDelay: engine.setInstrumentDelay, onReverb: engine.setInstrumentReverb
+      )
+    }
+  }
+
+  private var micBlock: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      if engine.micState == .ready {
+        Text("Live input into the loop. Use Sampler if you want to play a take from the pads.")
+          .font(.system(size: 14))
+          .foregroundStyle(LS.muted)
+      } else if engine.micState == .denied || engine.micState == .error {
+        Text(engine.micError ?? "Microphone is unavailable. Use the keys instead.")
+          .font(.system(size: 14))
+          .foregroundStyle(LS.muted)
+        Button("Try again") { engine.enableMic() }
+          .foregroundStyle(LS.fg)
+      } else if engine.micState == .pending {
+        Text("Requesting microphone access…")
+          .font(.system(size: 14))
+          .foregroundStyle(LS.muted)
       } else {
-        HStack {
-          Text("OCTAVE")
-            .font(.system(size: 11, weight: .medium))
-            .tracking(1.6)
-            .foregroundStyle(LS.subtle)
-          Spacer()
-          Button { engine.setInstrumentOctave(engine.instrumentOctave - 1) } label: {
-            Image(systemName: "minus").frame(width: 32, height: 32)
+        Button("Enable microphone") { engine.enableMic() }
+          .font(.system(size: 15, weight: .medium))
+          .foregroundStyle(LS.bg)
+          .frame(height: 44)
+          .padding(.horizontal, 16)
+          .background(LS.fg, in: Capsule())
+      }
+      Toggle("Monitor", isOn: Binding(get: { engine.monitorOn }, set: { engine.setMonitorOn($0) }))
+        .tint(LS.accent)
+        .foregroundStyle(LS.fg)
+    }
+  }
+}
+
+struct KeyPadView: View {
+  @ObservedObject var engine: LoopEngine
+
+  private var columns: Int { engine.scaleMode == .chromatic ? 6 : 4 }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      HStack {
+        Text("KEY")
+          .font(.system(size: 11, weight: .medium))
+          .tracking(1.6)
+          .foregroundStyle(LS.subtle)
+        ScrollView(.horizontal, showsIndicators: false) {
+          HStack(spacing: 4) {
+            ForEach(0..<12, id: \.self) { pc in
+              let label = MusicKey.name(pc: pc, flats: MusicKey.usesFlats(root: engine.scaleRoot, mode: engine.scaleMode))
+              pill(label, on: engine.scaleRoot == pc) { engine.setScaleRoot(pc) }
+            }
           }
-          .foregroundStyle(LS.fg)
-          .disabled(engine.instrumentOctave <= -3)
-          Text(engine.instrumentOctave > 0 ? "+\(engine.instrumentOctave)" : "\(engine.instrumentOctave)")
-            .font(.system(size: 12, design: .monospaced))
-            .foregroundStyle(LS.muted)
-            .frame(width: 16)
-          Button { engine.setInstrumentOctave(engine.instrumentOctave + 1) } label: {
-            Image(systemName: "plus").frame(width: 32, height: 32)
-          }
-          .foregroundStyle(LS.fg)
-          .disabled(engine.instrumentOctave >= 3)
         }
-        noteGrid
       }
-    }
-  }
-
-  private var noteGrid: some View {
-    LazyVGrid(columns: [GridItem(.adaptive(minimum: 48), spacing: 6)], spacing: 6) {
-      ForEach(notes, id: \.midi) { note in
-        let midi = note.midi + engine.instrumentOctave * 12
-        let on = held.contains(midi)
-        Text(note.label)
+      HStack(spacing: 6) {
+        ForEach(ScaleMode.allCases) { mode in
+          pill(mode.label, on: engine.scaleMode == mode) { engine.setScaleMode(mode) }
+        }
+        Spacer()
+        pill("Arp", on: engine.arpOn) { engine.setArpOn(!engine.arpOn) }
+        Button { engine.setInstrumentOctave(engine.instrumentOctave - 1) } label: {
+          Image(systemName: "minus").frame(width: 32, height: 32)
+        }
+        .foregroundStyle(LS.fg)
+        .disabled(engine.instrumentOctave <= -3)
+        Text(engine.instrumentOctave > 0 ? "+\(engine.instrumentOctave)" : "\(engine.instrumentOctave)")
           .font(.system(size: 12, design: .monospaced))
-          .foregroundStyle(on ? LS.bg : (note.black ? LS.subtle : LS.muted))
-          .frame(width: 48, height: note.black ? 48 : 64)
-          .background(
-            on ? LS.accent : (note.black ? LS.surface : LS.bg),
-            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-          )
-          .gesture(
-            DragGesture(minimumDistance: 0)
-              .onChanged { _ in press(midi) }
-              .onEnded { _ in release(midi) }
-          )
+          .foregroundStyle(LS.muted)
+          .frame(width: 16)
+        Button { engine.setInstrumentOctave(engine.instrumentOctave + 1) } label: {
+          Image(systemName: "plus").frame(width: 32, height: 32)
+        }
+        .foregroundStyle(LS.fg)
+        .disabled(engine.instrumentOctave >= 3)
+      }
+      if engine.arpOn {
+        HStack(spacing: 6) {
+          pill("1/4", on: engine.arpDivision == 1) { engine.setArpDivision(1) }
+          pill("1/8", on: engine.arpDivision == 2) { engine.setArpDivision(2) }
+          pill("1/16", on: engine.arpDivision == 4) { engine.setArpDivision(4) }
+          pill("1/32", on: engine.arpDivision == 8) { engine.setArpDivision(8) }
+        }
+        HStack(spacing: 6) {
+          pill("Up", on: engine.arpMode == 0) { engine.setArpMode(0) }
+          pill("Down", on: engine.arpMode == 1) { engine.setArpMode(1) }
+          pill("Ping", on: engine.arpMode == 2) { engine.setArpMode(2) }
+        }
+      }
+      LazyVGrid(
+        columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns),
+        spacing: 8
+      ) {
+        ForEach(engine.padNotes) { note in
+          let on = engine.heldNotes.contains(note.midi)
+          Text(note.label)
+            .font(.system(size: 16, weight: note.isRoot ? .semibold : .medium, design: .monospaced))
+            .foregroundStyle(on ? LS.bg : (note.isRoot ? LS.fg : LS.muted))
+            .frame(maxWidth: .infinity)
+            .frame(height: engine.scaleMode == .chromatic ? 52 : 64)
+            .background(
+              on ? LS.accent : (note.isRoot ? LS.surface2 : LS.bg),
+              in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
+            .contentShape(Rectangle())
+            .gesture(
+              DragGesture(minimumDistance: 0)
+                .onChanged { _ in engine.pressNote(note.midi) }
+                .onEnded { _ in engine.releaseNote(note.midi) }
+            )
+            .accessibilityLabel(note.label)
+        }
       }
     }
   }
+}
 
-  private func press(_ n: Int) {
-    guard !held.contains(n) else { return }
-    held.insert(n)
-    engine.noteOn(n)
+struct HardwareTypingView: UIViewRepresentable {
+  var onDown: (String) -> Void
+  var onUp: (String) -> Void
+
+  func makeUIView(context: Context) -> KeyCatcherView {
+    let view = KeyCatcherView()
+    view.onDown = onDown
+    view.onUp = onUp
+    return view
   }
 
-  private func release(_ n: Int) {
-    guard held.contains(n) else { return }
-    held.remove(n)
-    engine.noteOff(n)
+  func updateUIView(_ uiView: KeyCatcherView, context: Context) {
+    uiView.onDown = onDown
+    uiView.onUp = onUp
+  }
+}
+
+final class KeyCatcherView: UIView {
+  var onDown: ((String) -> Void)?
+  var onUp: ((String) -> Void)?
+
+  override var canBecomeFirstResponder: Bool { true }
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    backgroundColor = .clear
+    isUserInteractionEnabled = false
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window != nil {
+      DispatchQueue.main.async { _ = self.becomeFirstResponder() }
+    }
+  }
+
+  override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+    let flags = event?.modifierFlags ?? []
+    if flags.contains(.command) || flags.contains(.control) || flags.contains(.alternate) {
+      super.pressesBegan(presses, with: event)
+      return
+    }
+    var handled = false
+    for press in presses {
+      guard let chars = press.key?.charactersIgnoringModifiers, !chars.isEmpty else { continue }
+      onDown?(chars)
+      handled = true
+    }
+    if !handled { super.pressesBegan(presses, with: event) }
+  }
+
+  override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+    var handled = false
+    for press in presses {
+      guard let chars = press.key?.charactersIgnoringModifiers, !chars.isEmpty else { continue }
+      onUp?(chars)
+      handled = true
+    }
+    if !handled { super.pressesEnded(presses, with: event) }
+  }
+
+  override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+    pressesEnded(presses, with: event)
   }
 }
 
@@ -455,16 +738,34 @@ struct DrumsView: View {
             .foregroundStyle(LS.fg)
         }
         Spacer()
+        pill("Jam", on: engine.jamMode) { engine.setJam(!engine.jamMode) }
+        pill("Fill", on: engine.fillArmed) { engine.requestFill() }
         Toggle("", isOn: Binding(get: { engine.drumsOn }, set: { engine.setDrumsOn($0) }))
           .labelsHidden()
           .tint(LS.accent)
       }
+      HStack(spacing: 6) {
+        pill("Analog", on: !engine.acousticKit) { engine.setAcousticKit(false) }
+        pill("Acoustic", on: engine.acousticKit) { engine.setAcousticKit(true) }
+      }
+      Text(
+        engine.jamMode
+          ? "Picks a new kit on every downbeat."
+          : "Starts on the loop downbeat. Fill plays a 1-bar break on the next bar."
+      )
+        .font(.system(size: 13))
+        .foregroundStyle(LS.muted)
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: 6) {
           ForEach(engine.drums) { p in
             pill(p.name, on: engine.drumId == p.id) { engine.setDrumId(p.id) }
           }
         }
+      }
+      LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+        FxRow(label: "Drive", value: engine.drumDrive, display: "\(Int(engine.drumDrive * 100))", onChange: engine.setDrumDrive)
+        FxRow(label: "Dirt", value: engine.drumDirt, display: "\(Int(engine.drumDirt * 100))", onChange: engine.setDrumDirt)
+        FxRow(label: "Vinyl", value: engine.drumVinyl, display: "\(Int(engine.drumVinyl * 100))", onChange: engine.setDrumVinyl)
       }
     }
   }
@@ -609,24 +910,27 @@ struct PeakView: View {
   var muted: Bool = false
   var recording: Bool = false
   var body: some View {
-    GeometryReader { geo in
+    Canvas { ctx, size in
       let n = max(peaks.count, 1)
-      let w = geo.size.width / CGFloat(n)
+      let w = size.width / CGFloat(n)
       let color = recording ? LS.record : (muted ? LS.subtle : LS.accent)
-      ZStack(alignment: .leading) {
-        HStack(alignment: .center, spacing: 0) {
-          ForEach(0..<n, id: \.self) { i in
-            Capsule()
-              .fill(color.opacity(muted ? 0.35 : 0.45 + Double(peaks[i]) * 0.55))
-              .frame(width: max(1, w - 1), height: max(2, CGFloat(peaks[i]) * geo.size.height))
-          }
-        }
-        if running {
-          Rectangle()
-            .fill(LS.record)
-            .frame(width: 2, height: geo.size.height)
-            .offset(x: max(0, CGFloat(position) * geo.size.width - 1))
-        }
+      for i in 0..<n {
+        let p = i < peaks.count ? peaks[i] : 0
+        let h = max(2, CGFloat(p) * size.height)
+        let rect = CGRect(
+          x: CGFloat(i) * w,
+          y: (size.height - h) / 2,
+          width: max(w * 0.78, 0.8),
+          height: h
+        )
+        ctx.fill(
+          Path(roundedRect: rect, cornerRadius: 1),
+          with: .color(color.opacity(muted ? 0.35 : 0.45 + Double(p) * 0.55))
+        )
+      }
+      if running {
+        let x = max(0, min(size.width - 2, CGFloat(position) * size.width))
+        ctx.fill(Path(CGRect(x: x, y: 0, width: 2, height: size.height)), with: .color(LS.record))
       }
     }
     .frame(height: 48)

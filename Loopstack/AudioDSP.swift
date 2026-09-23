@@ -1,7 +1,7 @@
 import AVFoundation
 import Foundation
 
-enum InstrumentPreset: String, CaseIterable, Identifiable {
+enum InstrumentPreset: String, CaseIterable, Identifiable, Codable {
   case keys, bass, pluck, pad, noise
   var id: String { rawValue }
   var label: String {
@@ -10,6 +10,31 @@ enum InstrumentPreset: String, CaseIterable, Identifiable {
     case .bass: return "Bass"
     case .pluck: return "Pluck"
     case .pad: return "Pad"
+    case .noise: return "Noise"
+    }
+  }
+  var defaultWave: OscWave {
+    switch self {
+    case .keys: return .warm
+    case .bass: return .sine
+    case .pluck: return .triangle
+    case .pad: return .sine
+    case .noise: return .noise
+    }
+  }
+}
+
+enum OscWave: String, CaseIterable, Identifiable, Codable {
+  case warm, sine, triangle, saw, square, pulse, noise
+  var id: String { rawValue }
+  var label: String {
+    switch self {
+    case .warm: return "Warm"
+    case .sine: return "Sine"
+    case .triangle: return "Tri"
+    case .saw: return "Saw"
+    case .square: return "Sqr"
+    case .pulse: return "Pulse"
     case .noise: return "Noise"
     }
   }
@@ -22,8 +47,13 @@ enum AudioDSP {
 
   static func makeBuffer(frames: Int, sampleRate: Double) -> AVAudioPCMBuffer {
     let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
-    let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))!
-    buf.frameLength = AVAudioFrameCount(frames)
+    return makeBuffer(frames: frames, format: format)
+  }
+
+  static func makeBuffer(frames: Int, format: AVAudioFormat) -> AVAudioPCMBuffer {
+    let n = max(1, frames)
+    let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(n))!
+    buf.frameLength = AVAudioFrameCount(n)
     return buf
   }
 
@@ -45,12 +75,13 @@ enum AudioDSP {
     return buf
   }
 
-  static func renderMetronome(bpm: Double, bars: Int, beatsPerBar: Int, sampleRate: Double) -> AVAudioPCMBuffer {
+  static func renderMetronome(bpm: Double, bars: Int, beatsPerBar: Int, format: AVAudioFormat) -> AVAudioPCMBuffer {
+    let sampleRate = format.sampleRate
     let duration = Double(bars * beatsPerBar) * 60 / bpm
     let frames = max(1, Int((duration * sampleRate).rounded()))
-    let buf = makeBuffer(frames: frames, sampleRate: sampleRate)
+    let buf = makeBuffer(frames: frames, format: format)
     let l = buf.floatChannelData![0]
-    let r = buf.floatChannelData![1]
+    let r = buf.format.channelCount > 1 ? buf.floatChannelData![1] : l
     let beatSec = 60 / bpm
     let beats = bars * beatsPerBar
     for b in 0..<beats {
@@ -73,15 +104,36 @@ enum AudioDSP {
     return buf
   }
 
-  static func renderPattern(_ pattern: DrumPattern, bpm: Double, loopBars: Int, sampleRate: Double) -> AVAudioPCMBuffer {
+  static func renderPattern(
+    _ pattern: DrumPattern,
+    bpm: Double,
+    loopBars: Int,
+    format: AVAudioFormat,
+    acoustic: Bool = false
+  ) -> AVAudioPCMBuffer {
+    let sampleRate = format.sampleRate
     let duration = Double(loopBars * 4) * 60 / bpm
     let frames = max(1, Int((duration * sampleRate).rounded()))
-    let buf = makeBuffer(frames: frames, sampleRate: sampleRate)
+    let buf = makeBuffer(frames: frames, format: format)
     let L = buf.floatChannelData![0]
-    let R = buf.floatChannelData![1]
+    let R = buf.format.channelCount > 1 ? buf.floatChannelData![1] : L
+    let oL = UnsafeMutablePointer<Float>.allocate(capacity: frames)
+    let oR = UnsafeMutablePointer<Float>.allocate(capacity: frames)
+    oL.initialize(repeating: 0, count: frames)
+    oR.initialize(repeating: 0, count: frames)
+    defer {
+      oL.deinitialize(count: frames)
+      oR.deinitialize(count: frames)
+      oL.deallocate()
+      oR.deallocate()
+    }
     let beatSec = 60 / bpm
     let sixteenth = beatSec / 4
     let repeats = max(1, loopBars / max(1, pattern.bars))
+    var rng = DrumRng(seed: drumSeed(pattern, bpm: bpm, bars: loopBars))
+    struct Placed { var t: Double; var vel: Float; var voice: DrumVoice }
+    var placed: [Placed] = []
+    placed.reserveCapacity(pattern.hits.count * repeats)
     for rep in 0..<repeats {
       let barOffsetBeats = Double(rep * pattern.bars * 4)
       for hit in pattern.hits {
@@ -89,12 +141,206 @@ enum AudioDSP {
         if pattern.swing > 0 && hit.step % 2 == 1 {
           t += Double(pattern.swing) * sixteenth * 0.5
         }
-        let at = Int((t * sampleRate).rounded())
-        renderVoice(hit.voice, L, R, frames, sampleRate, at, hit.vel)
+        var vel = hit.vel
+        humanize(hit.voice, t: &t, vel: &vel, rng: &rng)
+        placed.append(Placed(t: t, vel: vel, voice: hit.voice))
       }
+    }
+    placed.sort { a, b in
+      if abs(a.t - b.t) > 0.0004 { return a.t < b.t }
+      if a.voice == .ohat && b.voice != .ohat { return false }
+      if a.voice != .ohat && b.voice == .ohat { return true }
+      return a.voice.rawValue < b.voice.rawValue
+    }
+    for hit in placed {
+      let at = Int((hit.t * sampleRate).rounded())
+      let destL = hit.voice == .ohat ? oL : L
+      let destR = hit.voice == .ohat ? oR : R
+      if hit.voice == .hat {
+        chokeOpenHats(oL, oR, from: at, frames: frames, sr: sampleRate)
+      }
+      if acoustic {
+        let n = AcousticKit.mix(hit.voice, vel: hit.vel, destL, destR, frames, sampleRate, at)
+        if n == 0 {
+          renderVoice(hit.voice, destL, destR, frames, sampleRate, at, hit.vel)
+        }
+      } else {
+        renderVoice(hit.voice, destL, destR, frames, sampleRate, at, hit.vel)
+      }
+    }
+    for i in 0..<frames {
+      L[i] += oL[i]
+      R[i] += oR[i]
     }
     normalize(L, R, frames)
     return buf
+  }
+
+  @discardableResult
+  static func mixSample(
+    _ sample: AVAudioPCMBuffer,
+    _ L: UnsafeMutablePointer<Float>,
+    _ R: UnsafeMutablePointer<Float>,
+    _ frames: Int,
+    _ sr: Double,
+    _ at: Int,
+    gain: Float,
+    pitch: Float = 1,
+    tone: Float = 1,
+    maxSec: Double = 12
+  ) -> Int {
+    guard let src = sample.floatChannelData, gain != 0 else { return 0 }
+    let sn = Int(sample.frameLength)
+    guard sn > 1 else { return 0 }
+    let ssr = sample.format.sampleRate
+    let chs = Int(sample.format.channelCount)
+    let g = gain
+    let step = (ssr / sr) * Double(max(0.25, pitch))
+    let maxN = min(frames - at, Int((maxSec * sr).rounded()))
+    guard maxN > 8, at < frames else { return 0 }
+    let fc = 700.0 + Double(max(0, min(1, tone))) * 15_400.0
+    let a = Float(1 - exp(-2 * Double.pi * fc / sr))
+    var lpL: Float = 0
+    var lpR: Float = 0
+    var srcPos = 0.0
+    var written = 0
+    let fadeN = min(maxN / 4, max(24, Int(sr * 0.008)))
+    while srcPos < Double(sn - 1) && written < maxN {
+      let dst = at + written
+      if dst >= 0 && dst < frames {
+        let i0 = Int(srcPos)
+        let i1 = min(i0 + 1, sn - 1)
+        let frac = Float(srcPos - Double(i0))
+        var sL = src[0][i0] * (1 - frac) + src[0][i1] * frac
+        var sR = chs > 1 ? src[1][i0] * (1 - frac) + src[1][i1] * frac : sL
+        lpL += a * (sL - lpL)
+        lpR += a * (sR - lpR)
+        sL = lpL
+        sR = lpR
+        let tail = maxN - 1 - written
+        var env: Float = 1
+        if written < 4 { env = Float(written) / 4 }
+        if tail < fadeN { env *= Float(tail) / Float(fadeN) }
+        L[dst] += sL * g * env
+        R[dst] += sR * g * env
+      }
+      srcPos += step
+      written += 1
+    }
+    return written
+  }
+
+  private static func chokeOpenHats(
+    _ L: UnsafeMutablePointer<Float>,
+    _ R: UnsafeMutablePointer<Float>,
+    from: Int,
+    frames: Int,
+    sr: Double
+  ) {
+    let fade = max(8, Int(sr * 0.007))
+    var i = max(0, from)
+    while i < frames {
+      let w: Float
+      let k = i - from
+      if k < fade {
+        w = 1 - Float(k) / Float(fade)
+      } else {
+        w = 0
+      }
+      L[i] *= w
+      R[i] *= w
+      if w == 0 {
+        i += 1
+        while i < frames {
+          L[i] = 0
+          R[i] = 0
+          i += 1
+        }
+        return
+      }
+      i += 1
+    }
+  }
+
+  private static func humanize(_ voice: DrumVoice, t: inout Double, vel: inout Float, rng: inout DrumRng) {
+    let (velAmt, timeAmt): (Double, Double)
+    switch voice {
+    case .kick: velAmt = 0.028; timeAmt = 0.0011
+    case .snare: velAmt = 0.055; timeAmt = 0.0022
+    case .hat: velAmt = 0.08; timeAmt = 0.0036
+    case .ohat: velAmt = 0.05; timeAmt = 0.0024
+    case .clap: velAmt = 0.04; timeAmt = 0.0018
+    case .rim: velAmt = 0.06; timeAmt = 0.002
+    case .tom: velAmt = 0.045; timeAmt = 0.0016
+    case .perc: velAmt = 0.07; timeAmt = 0.0028
+    }
+    vel = max(0.05, min(1, vel * Float(1 + rng.bipolar() * velAmt)))
+    t += rng.bipolar() * timeAmt
+    t = max(0, t)
+  }
+
+  private static func drumSeed(_ pattern: DrumPattern, bpm: Double, bars: Int) -> UInt64 {
+    var h: UInt64 = 0xcbf29ce484222325
+    for b in pattern.id.utf8 {
+      h ^= UInt64(b)
+      h = h &* 0x100000001b3
+    }
+    h ^= UInt64(pattern.hits.count) &* 0x9E3779B97F4A7C15
+    h ^= UInt64(Int(bpm.rounded()))
+    h ^= UInt64(bars) &* 0xBF58476D1CE4E5B9
+    return h
+  }
+
+  /// Drive, dirt, and vinyl (wow/flutter, rumble, crackle) — not a noise pad.
+  static func colorDrums(_ buf: AVAudioPCMBuffer, drive: Float, dirt: Float, vinyl: Float) {
+    let n = Int(buf.frameLength)
+    guard n > 16, let data = buf.floatChannelData else { return }
+    let sr = buf.format.sampleRate
+    let chs = Int(buf.format.channelCount)
+    let driveAmt = 1 + drive * 4.5
+    let vinylAmt = Double(max(0, min(1, vinyl)))
+    for c in 0..<chs {
+      let ch = data[c]
+      var src = [Float](repeating: 0, count: n)
+      for i in 0..<n { src[i] = ch[i] }
+      var lp: Float = 0
+      var prev: Float = 0
+      var crackle = 0
+      for i in 0..<n {
+        let t = Double(i) / sr
+        var idx = Double(i)
+        if vinylAmt > 0.001 {
+          idx += sin(2 * Double.pi * 0.32 * t) * vinylAmt * 0.0022 * sr
+          idx += sin(2 * Double.pi * 13.0 * t) * vinylAmt * 0.00028 * sr
+        }
+        let i0 = max(0, min(n - 2, Int(floor(idx))))
+        let frac = Float(idx - floor(idx))
+        var x = src[i0] * (1 - frac) + src[i0 + 1] * frac
+        if drive > 0.01 {
+          let g = driveAmt
+          x = tanhf(x * g) / tanhf(g)
+        }
+        if dirt > 0.01 {
+          let hp = x - prev
+          prev = x
+          x += hp * dirt * 0.22
+          x += tanhf(x * x * x * (2 + dirt * 4)) * dirt * 0.18
+        }
+        if vinylAmt > 0.01 {
+          x += Float(sin(2 * Double.pi * 31 * t) * vinylAmt * 0.035)
+          if crackle > 0 {
+            x += Float(crackle) * 0.012 * (Float.random(in: -1...1))
+            crackle -= 1
+          } else if Double.random(in: 0..<1) < vinylAmt * 0.0024 {
+            crackle = Int.random(in: 2...18)
+            x += Float.random(in: 0.12...0.35) * (Bool.random() ? 1 : -1)
+          }
+          lp += 0.12 * (x - lp)
+          x = x * Float(1 - vinylAmt * 0.45) + lp * Float(vinylAmt * 0.45)
+        }
+        ch[i] = max(-1, min(1, x))
+      }
+    }
   }
 
   static func renderVoice(_ voice: DrumVoice, _ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
@@ -117,99 +363,151 @@ enum AudioDSP {
   }
 
   private static func kick(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
-    let n = Int(sr * 0.42)
+    let v = Double(max(0.05, vel))
+    let n = Int(sr * (0.22 + 0.28 * v))
     var phase = 0.0
+    var clickPh = 0.0
+    let clickAmt = 0.04 + 0.28 * v
+    let decay = 8.4 - 3.2 * v
+    let amp = 0.42 + 0.58 * v
     for i in 0..<n {
       let t = Double(i) / sr
-      let freq = 46 + 130 * exp(-t * 32)
-      let env = exp(-t * 8.2)
-      let click = exp(-t * 110)
+      let freq = 38 + 22 * v + (70 + 110 * v) * exp(-t * (22 + 10 * v))
+      let env = exp(-t * decay)
+      clickPh += (2 * Double.pi * (1600 + 900 * v)) / sr
+      let click = sin(clickPh) * exp(-t * (70 + 40 * v)) + Double(white()) * exp(-t * 160) * 0.35
       phase += (2 * Double.pi * freq) / sr
-      let s = Float((sin(phase) * env + click * 0.18) * Double(vel) * 0.95)
-      write(L, R, frames, at + i, s, s)
+      var s = (sin(phase) * env * (0.78 + 0.18 * v) + click * clickAmt) * amp
+      if v > 0.75 {
+        s = tanh(s * (1.0 + (v - 0.75) * 1.4))
+      }
+      let out = Float(s)
+      write(L, R, frames, at + i, out, out)
     }
   }
 
   private static func tom(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
-    let n = Int(sr * 0.28)
+    let v = Double(max(0.05, vel))
+    let n = Int(sr * (0.14 + 0.24 * v))
     var phase = 0.0
+    let decay = 14 - 6.5 * v
+    let amp = 0.38 + 0.62 * v
     for i in 0..<n {
       let t = Double(i) / sr
-      let freq = 110 + 70 * exp(-t * 22)
-      let env = exp(-t * 10)
+      let freq = 88 + 55 * v + (50 + 40 * v) * exp(-t * (16 + 6 * v))
+      let env = exp(-t * decay)
       phase += (2 * Double.pi * freq) / sr
-      let s = Float(sin(phase) * env * Double(vel) * 0.7)
+      let noise = Double(white()) * exp(-t * (50 + 20 * v)) * (0.08 + 0.18 * v)
+      let s = Float((sin(phase) * env + noise) * amp * 0.72)
       write(L, R, frames, at + i, s * 0.85, s * 1.05)
     }
   }
 
   private static func snare(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
-    let n = Int(sr * 0.22)
+    let v = Double(max(0.05, vel))
+    let n = Int(sr * (0.10 + 0.16 * v))
     var phase = 0.0
+    var hp: Float = 0
+    var lp: Float = 0
+    let lpA = Float(0.16 + 0.58 * v)
+    let amp = 0.40 + 0.60 * v
+    let bodyMix = 0.62 - 0.28 * v
+    let noiseMix = 0.38 + 0.42 * v
     for i in 0..<n {
       let t = Double(i) / sr
-      let noiseEnv = exp(-t * 14)
-      phase += (2 * Double.pi * 186) / sr
-      let noise = (Float.random(in: -1...1)) * Float(noiseEnv)
-      let body = Float(sin(phase) * exp(-t * 12))
-      let s = (body * 0.45 + noise * 0.7) * vel * 0.8
+      phase += (2 * Double.pi * (155 + 55 * v)) / sr
+      let body = sin(phase) * exp(-t * (11 - 3 * v))
+      let raw = white()
+      hp += 0.22 * (raw - hp)
+      lp += lpA * ((raw - hp) - lp)
+      let noise = Double(lp) * exp(-t * (16 - 7 * v))
+      let s = Float((body * bodyMix + noise * noiseMix) * amp * 0.7)
       write(L, R, frames, at + i, s * 1.05, s * 0.95)
     }
   }
 
   private static func clap(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
-    for delay in [0.0, 0.012, 0.024, 0.048] {
+    let v = Double(max(0.05, vel))
+    let delays: [Double]
+    if v < 0.35 {
+      delays = [0.0, 0.013]
+    } else if v < 0.7 {
+      delays = [0.0, 0.011, 0.024]
+    } else {
+      delays = [0.0, 0.008, 0.017, 0.036]
+    }
+    let amp = 0.34 + 0.66 * v
+    let decay = 34 - 12 * v
+    let lpA = Float(0.18 + 0.55 * v)
+    for delay in delays {
       let start = at + Int(delay * sr)
-      let n = Int(sr * 0.09)
+      let n = Int(sr * (0.055 + 0.05 * v))
+      var lp: Float = 0
       for i in 0..<n {
         let t = Double(i) / sr
-        let s = Float.random(in: -1...1) * Float(exp(-t * 28)) * vel * 0.42
+        let raw = white()
+        lp += lpA * (raw - lp)
+        let s = lp * Float(exp(-t * decay)) * Float(amp * 0.46)
         write(L, R, frames, start + i, s * 0.95, s * 1.05)
       }
     }
   }
 
   private static func hat(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float, open: Bool) {
-    let n = Int(sr * (open ? 0.28 : 0.055))
-    let decay = open ? 9.0 : 55.0
+    let v = Double(max(0.05, vel))
+    let n = Int(sr * (open ? (0.14 + 0.20 * v) : (0.026 + 0.042 * v)))
+    let decay = open ? (12.0 - 5.0 * v) : (58.0 - 20.0 * v)
+    let amp = (0.38 + 0.62 * v) * (open ? 0.34 : 0.28)
     var hp: Float = 0
+    var lp: Float = 0
+    let lpA = Float(0.14 + 0.62 * v)
     for i in 0..<n {
       let t = Double(i) / sr
-      let white = Float.random(in: -1...1)
-      hp += 0.35 * (white - hp)
-      let high = white - hp
-      let s = high * Float(exp(-t * decay)) * vel * (open ? 0.38 : 0.32)
-      write(L, R, frames, at + i, s * 0.8, s * 1.2)
+      let raw = white()
+      hp += 0.18 * (raw - hp)
+      let high = raw - hp
+      lp += lpA * (high - lp)
+      let s = lp * Float(exp(-t * decay)) * Float(amp)
+      write(L, R, frames, at + i, s * 0.78, s * 1.22)
     }
   }
 
   private static func rim(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
-    let n = Int(sr * 0.04)
+    let v = Double(max(0.05, vel))
+    let n = Int(sr * (0.028 + 0.022 * v))
     var p1 = 0.0
     var p2 = 0.0
+    let amp = 0.36 + 0.64 * v
+    let highMix = 0.28 + 0.55 * v
     for i in 0..<n {
       let t = Double(i) / sr
-      let env = exp(-t * 70)
-      p1 += (2 * Double.pi * 845) / sr
-      p2 += (2 * Double.pi * 1280) / sr
-      let s = Float((sin(p1) + sin(p2) * 0.5) * env * Double(vel) * 0.35)
+      let env = exp(-t * (88 - 22 * v))
+      p1 += (2 * Double.pi * (780 + 80 * v)) / sr
+      p2 += (2 * Double.pi * (1180 + 220 * v)) / sr
+      let click = Double(white()) * exp(-t * 140) * (0.08 + 0.2 * v)
+      let s = Float((sin(p1) * (1 - highMix * 0.35) + sin(p2) * highMix + click) * env * amp * 0.38)
       write(L, R, frames, at + i, s, s)
     }
   }
 
   private static func perc(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
-    let n = Int(sr * 0.12)
+    let v = Double(max(0.05, vel))
+    let n = Int(sr * (0.07 + 0.09 * v))
     var phase = 0.0
+    let amp = 0.34 + 0.66 * v
+    let decay = 28 - 10 * v
     for i in 0..<n {
       let t = Double(i) / sr
-      let freq = 420 + 180 * exp(-t * 40)
-      let env = exp(-t * 22)
+      let freq = 360 + 140 * v + (140 + 80 * v) * exp(-t * (32 + 8 * v))
+      let env = exp(-t * decay)
       phase += (2 * Double.pi * freq) / sr
-      let noise = Float.random(in: -1...1) * Float(exp(-t * 40)) * 0.25
-      let s = (Float(sin(phase) * env) + noise) * vel * 0.45
+      let noise = Double(white()) * exp(-t * (48 - 12 * v)) * (0.12 + 0.32 * v)
+      let s = Float((sin(phase) * env + noise) * amp * 0.48)
       write(L, R, frames, at + i, s * 1.15, s * 0.8)
     }
   }
+
+  private static func white() -> Float { Float.random(in: -1...1) }
 
   static func normalize(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int) {
     var peak: Float = 1e-6
@@ -244,9 +542,50 @@ enum AudioDSP {
     return out
   }
 
+  static func slice(_ buffer: AVAudioPCMBuffer, from start: Int, fadeIn: Int = 64) -> AVAudioPCMBuffer? {
+    let n = Int(buffer.frameLength)
+    guard start > 0, start < n - 8, let src = buffer.floatChannelData else { return nil }
+    let len = n - start
+    let out = makeBuffer(frames: len, format: buffer.format)
+    let chs = Int(buffer.format.channelCount)
+    let fade = min(fadeIn, max(8, len / 8))
+    for c in 0..<chs {
+      let s = src[c]
+      let d = out.floatChannelData![c]
+      for i in 0..<len {
+        var x = s[start + i]
+        if i < fade { x *= Float(i) / Float(fade) }
+        d[i] = x
+      }
+    }
+    return out
+  }
+
+  /// Crossfade the loop join and fade the edges so playback doesn’t pop.
+  static func sealLoop(_ buffer: AVAudioPCMBuffer, fadeMs: Double = 8) {
+    let n = Int(buffer.frameLength)
+    guard n > 64, let channels = buffer.floatChannelData else { return }
+    let fade = min(n / 6, max(32, Int(buffer.format.sampleRate * fadeMs / 1000.0)))
+    let chCount = Int(buffer.format.channelCount)
+    for c in 0..<chCount {
+      let ch = channels[c]
+      var mean: Float = 0
+      for i in 0..<n { mean += ch[i] }
+      mean /= Float(n)
+      for i in 0..<n { ch[i] -= mean }
+      for i in 0..<fade {
+        let w = Float(i) / Float(fade)
+        let a = ch[i]
+        let b = ch[n - fade + i]
+        ch[i] = b * (1 - w) + a * w
+        ch[n - fade + i] = b * (1 - w)
+      }
+    }
+  }
+
   static func reverse(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer {
     let n = Int(buffer.frameLength)
-    let out = makeBuffer(frames: n, sampleRate: buffer.format.sampleRate)
+    let out = makeBuffer(frames: n, format: buffer.format)
     for ch in 0..<Int(buffer.format.channelCount) {
       let src = buffer.floatChannelData![ch]
       let dst = out.floatChannelData![ch]
@@ -260,17 +599,18 @@ enum AudioDSP {
     preset: InstrumentPreset,
     velocity: Float,
     a4: Double,
-    sampleRate: Double,
+    format: AVAudioFormat,
     drift: Float = 0,
     ring: Float = 0,
     glitch: Float = 0
   ) -> AVAudioPCMBuffer {
+    let sampleRate = format.sampleRate
     let freq = midiToHz(midi, a4: a4)
     let seconds: Double = preset == .pluck ? 1.2 : 4
     let frames = Int(sampleRate * seconds)
-    let buf = makeBuffer(frames: frames, sampleRate: sampleRate)
+    let buf = makeBuffer(frames: frames, format: format)
     let L = buf.floatChannelData![0]
-    let R = buf.floatChannelData![1]
+    let R = buf.format.channelCount > 1 ? buf.floatChannelData![1] : L
     var pA = 0.0
     var pB = 0.0
     let detune: Double = preset == .keys ? 7 : preset == .bass ? 3 : preset == .pad ? 14 : 12
@@ -439,5 +779,19 @@ enum AudioDSP {
       }
     }
     return crc ^ 0xFFFFFFFF
+  }
+
+  private struct DrumRng {
+    var s: UInt64
+    init(seed: UInt64) { s = seed == 0 ? 0x9E3779B97F4A7C15 : seed }
+    mutating func next() -> UInt64 {
+      s &+= 0x9E3779B97F4A7C15
+      var z = s
+      z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+      z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+      return z ^ (z >> 31)
+    }
+    mutating func unit() -> Double { Double(next() >> 11) * 0x1.0p-53 }
+    mutating func bipolar() -> Double { unit() * 2 - 1 }
   }
 }
