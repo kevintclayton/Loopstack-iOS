@@ -80,7 +80,9 @@ final class LiveLayers: @unchecked Sendable {
   func endRecord(activate: Bool) {
     lock.lock()
     recording = false
-    if activate, slots.indices.contains(recIndex) {
+    // punchIn already started playback when the take filled; resetting the playhead
+    // again here (up to one UI tick later) jumped the loop back to 0 and tore.
+    if activate, slots.indices.contains(recIndex), !slots[recIndex].active {
       slots[recIndex].active = true
       slots[recIndex].playhead = 0
     }
