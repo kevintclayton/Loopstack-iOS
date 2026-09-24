@@ -41,8 +41,11 @@ final class LiveLayers: @unchecked Sendable {
     var playhead = 0
   }
 
+  /// Slot count is fixed, so index checks outside the lock don't read `slots`.
+  private static let slotRange = 0..<8
+
   private let lock = NSLock()
-  private var slots: [Slot] = Array(repeating: Slot(), count: 8)
+  private var slots: [Slot] = Array(repeating: Slot(), count: slotRange.count)
   private var recIndex = 0
   private var recWritten = 0
   private var recording = false
@@ -53,7 +56,7 @@ final class LiveLayers: @unchecked Sendable {
   private var retired = RetireBin()
 
   // Render thread only.
-  private var voices: [Voice] = Array(repeating: Voice(), count: 8)
+  private var voices: [Voice] = Array(repeating: Voice(), count: slotRange.count)
   private var renderGen: UInt64 = 0
 
   func setClock(start: TimeInterval, dur: Double, sampleRate: Double) {
@@ -83,7 +86,7 @@ final class LiveLayers: @unchecked Sendable {
   }
 
   func beginRecord(index: Int, frames: Int, gain: Float) {
-    guard slots.indices.contains(index), frames > 1 else { return }
+    guard Self.slotRange.contains(index), frames > 1 else { return }
     let n = frames
     var slot = Slot()
     slot.left = [Float](repeating: 0, count: n)
@@ -187,7 +190,7 @@ final class LiveLayers: @unchecked Sendable {
   }
 
   func setReverse(index: Int, buffer: AVAudioPCMBuffer) {
-    guard slots.indices.contains(index), let ch = buffer.floatChannelData else { return }
+    guard Self.slotRange.contains(index), let ch = buffer.floatChannelData else { return }
     let frames = Int(buffer.frameLength)
     guard frames > 1 else { return }
     let L = Array(UnsafeBufferPointer(start: ch[0], count: frames))
@@ -205,7 +208,7 @@ final class LiveLayers: @unchecked Sendable {
   }
 
   func setMix(index: Int, gain: Float, pan: Float, muted: Bool) {
-    guard slots.indices.contains(index) else { return }
+    guard Self.slotRange.contains(index) else { return }
     lock.lock()
     slots[index].gain = gain
     slots[index].pan = pan
@@ -215,7 +218,7 @@ final class LiveLayers: @unchecked Sendable {
   }
 
   func setReversed(index: Int, _ on: Bool) {
-    guard slots.indices.contains(index) else { return }
+    guard Self.slotRange.contains(index) else { return }
     lock.lock()
     slots[index].reversed = on
     changed()
@@ -223,7 +226,7 @@ final class LiveLayers: @unchecked Sendable {
   }
 
   func clear(index: Int) {
-    guard slots.indices.contains(index) else { return }
+    guard Self.slotRange.contains(index) else { return }
     lock.lock()
     if recIndex == index {
       recording = false
