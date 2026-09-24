@@ -204,6 +204,15 @@ final class LoopEngine: ObservableObject {
   @Published var instrumentOctave: Int = 0
   @Published var heldNotes: Set<Int> = []
   @Published var arpOn = false
+  /// Each pad plays the chord built on it from the selected key.
+  @Published var chordMode = false
+  @Published var chordSevenths = false
+  /// Notes each held pad is sounding (kept so a release matches its press even if
+  /// the key or chord mode changed in between).
+  private var chordFor: [Int: [Int]] = [:]
+  /// How many held pads share each sounding note, so releasing one chord doesn't
+  /// cut a note another held chord still needs.
+  private var soundingCount: [Int: Int] = [:]
   @Published var arpDivision = 4
   @Published var arpMode = 0 // 0 up, 1 down, 2 ping
   @Published var privacyOpen = false
@@ -942,6 +951,10 @@ final class LoopEngine: ObservableObject {
   func pressNote(_ midi: Int, velocity: Float = 0.85) {
     guard !heldNotes.contains(midi) else { return }
     heldNotes.insert(midi)
+    let notes = chordMode
+      ? MusicKey.chord(on: midi, root: scaleRoot, mode: scaleMode, sevenths: chordSevenths)
+      : [midi]
+    chordFor[midi] = notes
     if arpOn {
       if heldNotes.count == 1 {
         arpOrigin = CACurrentMediaTime()
@@ -949,15 +962,44 @@ final class LoopEngine: ObservableObject {
       }
       tickArp(force: true)
     } else {
-      noteOn(midi, velocity: velocity, steal: true)
+      for n in notes {
+        let count = soundingCount[n, default: 0]
+        soundingCount[n] = count + 1
+        if count == 0 { noteOn(n, velocity: velocity, steal: true) }
+      }
     }
   }
 
   func releaseNote(_ midi: Int) {
     guard heldNotes.contains(midi) else { return }
     heldNotes.remove(midi)
-    noteOff(midi)
+    let notes = chordFor.removeValue(forKey: midi) ?? [midi]
+    for n in notes {
+      let count = soundingCount[n, default: 0]
+      if count > 1 {
+        soundingCount[n] = count - 1
+      } else {
+        soundingCount[n] = nil
+        // With the arp, a note another held chord still uses keeps going.
+        if !arpNotes().contains(n) { noteOff(n) }
+      }
+    }
     if heldNotes.isEmpty { lastArpStep = -1 }
+  }
+
+  func setChordMode(_ on: Bool) { chordMode = on }
+  func setChordSevenths(_ on: Bool) { chordSevenths = on }
+
+  /// What a pad shows: its note, or in chord mode the chord it plays.
+  func padLabel(_ note: PadNote) -> String {
+    guard chordMode else { return note.label }
+    let notes = MusicKey.chord(on: note.midi, root: scaleRoot, mode: scaleMode, sevenths: chordSevenths)
+    return MusicKey.chordName(notes, flats: MusicKey.usesFlats(root: scaleRoot, mode: scaleMode))
+  }
+
+  /// Every note the held pads are sounding (their chords in chord mode).
+  private func arpNotes() -> [Int] {
+    Array(Set(heldNotes.flatMap { chordFor[$0] ?? [$0] })).sorted()
   }
 
   func setArpOn(_ on: Bool) {
@@ -1237,7 +1279,8 @@ final class LoopEngine: ObservableObject {
   }
 
   private func arpSequence() -> [Int] {
-    let sorted = heldNotes.sorted()
+    // Chord mode + arp: one pad arpeggiates its whole chord.
+    let sorted = arpNotes()
     if sorted.count < 2 { return sorted }
     switch arpMode {
     case 1: return sorted.reversed()

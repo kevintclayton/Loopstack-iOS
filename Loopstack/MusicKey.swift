@@ -79,6 +79,42 @@ enum MusicKey {
     return notes
   }
 
+  /// Chord built on `midi`: stacked thirds from the key (so every chord fits it), or
+  /// a major chord when there is no key (chromatic).
+  static func chord(on midi: Int, root: Int, mode: ScaleMode, sevenths: Bool) -> [Int] {
+    if mode == .chromatic {
+      return (sevenths ? [0, 4, 7, 11] : [0, 4, 7]).map { midi + $0 }
+    }
+    var notes = [midi]
+    var n = midi
+    for _ in 0..<(sevenths ? 3 : 2) {
+      n = nextInScale(after: nextInScale(after: n, root: root, mode: mode), root: root, mode: mode)
+      notes.append(n)
+    }
+    return notes
+  }
+
+  /// Chord symbol for notes from `chord(on:)`, e.g. "Dm", "G7", "Bø7".
+  static func chordName(_ notes: [Int], flats: Bool) -> String {
+    guard notes.count >= 3, let r = notes.first else { return notes.first.map { name(pc: $0 % 12, flats: flats) } ?? "" }
+    let third = notes[1] - r, fifth = notes[2] - r
+    let base = name(pc: r % 12, flats: flats)
+    let seventh = notes.count > 3 ? notes[3] - r : nil
+    switch (third, fifth, seventh) {
+    case (4, 7, nil): return base
+    case (3, 7, nil): return base + "m"
+    case (3, 6, nil): return base + "°"
+    case (4, 8, nil): return base + "+"
+    case (4, 7, 11): return base + "maj7"
+    case (4, 7, 10): return base + "7"
+    case (3, 7, 10): return base + "m7"
+    case (3, 7, 11): return base + "mM7"
+    case (3, 6, 10): return base + "ø7"
+    case (3, 6, 9): return base + "°7"
+    default: return base
+    }
+  }
+
   /// Home-row mapping onto the visible pads.
   static let typeOrder = ["a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'", "z", "x", "c", "v", "b"]
 

@@ -599,7 +599,6 @@ struct KeyPadView: View {
           pill(mode.label, on: engine.scaleMode == mode) { engine.setScaleMode(mode) }
         }
         Spacer()
-        pill("Arp", on: engine.arpOn) { engine.setArpOn(!engine.arpOn) }
         Button { engine.setInstrumentOctave(engine.instrumentOctave - 1) } label: {
           Image(systemName: "minus").frame(width: 32, height: 32)
         }
@@ -614,6 +613,14 @@ struct KeyPadView: View {
         }
         .foregroundStyle(LS.fg)
         .disabled(engine.instrumentOctave >= 3)
+      }
+      HStack(spacing: 6) {
+        pill("Arp", on: engine.arpOn) { engine.setArpOn(!engine.arpOn) }
+        pill("Chord", on: engine.chordMode) { engine.setChordMode(!engine.chordMode) }
+        if engine.chordMode {
+          pill("Triad", on: !engine.chordSevenths) { engine.setChordSevenths(false) }
+          pill("7th", on: engine.chordSevenths) { engine.setChordSevenths(true) }
+        }
       }
       if engine.arpOn {
         HStack(spacing: 6) {
@@ -634,8 +641,10 @@ struct KeyPadView: View {
       ) {
         ForEach(engine.padNotes) { note in
           let on = engine.heldNotes.contains(note.midi)
-          Text(note.label)
+          Text(engine.padLabel(note))
             .font(.system(size: 16, weight: note.isRoot ? .semibold : .medium, design: .monospaced))
+            .minimumScaleFactor(0.7)
+            .lineLimit(1)
             .foregroundStyle(on ? LS.bg : (note.isRoot ? LS.fg : LS.muted))
             .frame(maxWidth: .infinity)
             .frame(height: engine.scaleMode == .chromatic ? 52 : 64)
