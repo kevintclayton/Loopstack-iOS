@@ -1135,6 +1135,8 @@ final class LoopEngine: ObservableObject {
   private func tick() {
     let runningNow = engine.isRunning
     if audioRunning != runningNow { audioRunning = runningNow }
+    liveDrums.collect()
+    liveLayers.collect()
     if sessionRecording {
       sessionElapsed = CACurrentMediaTime() - sessionStarted
     }
@@ -1179,6 +1181,13 @@ final class LoopEngine: ObservableObject {
     if barIndex != lastBarIndex {
       lastBarIndex = barIndex
       if fillArmed, !closedTake { beginFill() }
+    }
+    // Queue an armed fill just before the next bar line so it plays from its first hit
+    // (the tick only notices a bar after crossing it, up to 50ms late).
+    let barDur = dur / Double(max(1, bars))
+    let toNextBar = barDur - pos.truncatingRemainder(dividingBy: barDur)
+    if fillArmed, !closedTake, toNextBar < 0.12 {
+      beginFill(at: now + toNextBar)
     }
     tickArp(force: false)
     if status == .armed && (pos < 0.08 || pos > 0.96) && elapsed > 0.1 {
@@ -1276,7 +1285,7 @@ final class LoopEngine: ObservableObject {
     drumId = next.id
   }
 
-  private func beginFill() {
+  private func beginFill(at barLine: TimeInterval? = nil) {
     fillArmed = false
     guard drumsOn, let fill = DrumLibrary.fills.randomElement() else { return }
     let buf = AudioDSP.renderPattern(
@@ -1287,7 +1296,10 @@ final class LoopEngine: ObservableObject {
       acoustic: acousticKit
     )
     let dur = Double(fill.bars * 4) * 60 / Double(bpm)
-    liveDrums.startFill(buf, duration: dur)
+    // Start on a bar line: the upcoming one when queued early, else the one just crossed.
+    let barDur = loopDuration / Double(max(1, bars))
+    let elapsed = max(0, CACurrentMediaTime() - cycleStart)
+    liveDrums.startFill(buf, duration: dur, at: barLine ?? cycleStart + floor(elapsed / barDur) * barDur)
   }
 
   private func rescheduleDrums() {
@@ -1695,54 +1707,117 @@ final class LiveSynth: @unchecked Sendable {
 
 /// Dry drum buffer played in lock-step with the transport; drive/dirt/vinyl are live.
 final class LiveDrums: @unchecked Sendable {
-  var enabled = false
-  var sampleRate: Double = 44100
-  var cycleStart: TimeInterval = 0
-  var loopDur: Double = 1
-  var drive: Float = 0.15
-  var dirt: Float = 0.12
-  var vinyl: Float = 0
+  /// State written by the main thread under `lock`. The render thread copies it
+  /// with `lock.try()` and never waits: if the lock is busy it plays on with its
+  /// last copy and picks up the change next cycle.
+  private struct Shared {
+    var enabled = false
+    var sampleRate: Double = 44100
+    var cycleStart: TimeInterval = 0
+    var loopDur: Double = 1
+    var drive: Float = 0.15
+    var dirt: Float = 0.12
+    var vinyl: Float = 0
+    var left: [Float] = []
+    var right: [Float] = []
+    var fillL: [Float] = []
+    var fillR: [Float] = []
+    var fillDur: Double = 0
+    /// Wall time the fill starts (the bar line), so a late UI tick doesn't delay it.
+    var fillAt: TimeInterval = 0
+    var gen: UInt64 = 0
+  }
+
   private let lock = NSLock()
-  private var left: [Float] = []
-  private var right: [Float] = []
-  private var n = 0
-  private var fillL: [Float] = []
-  private var fillR: [Float] = []
-  private var fillN = 0
-  private var fillDur: Double = 0
-  private var fillOrigin: TimeInterval = 0
-  private var filling = false
+  private var shared = Shared()
+  private var retired = RetireBin()
+  private var seenGen: UInt64 = 0
+
+  // Render-thread state.
+  private var r = Shared()
+  /// Seconds since cycleStart, advanced by exact frame counts. Reading the wall
+  /// clock every callback jittered the loop position by a millisecond or two.
+  private var playhead: Double?
+  private var lastCycleStart: TimeInterval = 0
   private var crackle = 0
   private var prev: Float = 0
   private var lp: Float = 0
+  private var rng = RTRandom()
+
+  var enabled: Bool {
+    get { read { $0.enabled } }
+    set { write { $0.enabled = newValue } }
+  }
+  var sampleRate: Double {
+    get { read { $0.sampleRate } }
+    set { write { $0.sampleRate = newValue } }
+  }
+  var cycleStart: TimeInterval {
+    get { read { $0.cycleStart } }
+    set { write { $0.cycleStart = newValue } }
+  }
+  var loopDur: Double {
+    get { read { $0.loopDur } }
+    set { write { $0.loopDur = newValue } }
+  }
+  var drive: Float {
+    get { read { $0.drive } }
+    set { write { $0.drive = newValue } }
+  }
+  var dirt: Float {
+    get { read { $0.dirt } }
+    set { write { $0.dirt = newValue } }
+  }
+  var vinyl: Float {
+    get { read { $0.vinyl } }
+    set { write { $0.vinyl = newValue } }
+  }
+
+  private func read<T>(_ f: (Shared) -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return f(shared)
+  }
+
+  private func write(_ f: (inout Shared) -> Void) {
+    lock.lock()
+    f(&shared)
+    shared.gen &+= 1
+    let dead = retired.collect(seen: seenGen)
+    lock.unlock()
+    _ = dead  // released here, off the render thread
+  }
+
+  /// Frees buffers the renderer has let go of. Call from the UI tick.
+  func collect() {
+    write { _ in }
+  }
 
   func setDry(_ buf: AVAudioPCMBuffer) {
     let frames = Int(buf.frameLength)
     guard frames > 0, let ch = buf.floatChannelData else { return }
-    lock.lock()
-    n = frames
-    left = Array(UnsafeBufferPointer(start: ch[0], count: frames))
-    if buf.format.channelCount > 1 {
-      right = Array(UnsafeBufferPointer(start: ch[1], count: frames))
-    } else {
-      right = left
+    let L = Array(UnsafeBufferPointer(start: ch[0], count: frames))
+    let R = buf.format.channelCount > 1 ? Array(UnsafeBufferPointer(start: ch[1], count: frames)) : L
+    write { s in
+      retired.retire([s.left, s.right], gen: s.gen &+ 1)
+      s.left = L
+      s.right = R
     }
-    lock.unlock()
   }
 
-  func startFill(_ buf: AVAudioPCMBuffer, duration: Double) {
+  func startFill(_ buf: AVAudioPCMBuffer, duration: Double, at: TimeInterval? = nil) {
     let frames = Int(buf.frameLength)
     guard frames > 1, let ch = buf.floatChannelData else { return }
-    lock.lock()
-    fillN = frames
-    fillL = Array(UnsafeBufferPointer(start: ch[0], count: frames))
-    fillR = buf.format.channelCount > 1
-      ? Array(UnsafeBufferPointer(start: ch[1], count: frames))
-      : fillL
-    fillDur = max(duration, 0.05)
-    fillOrigin = CACurrentMediaTime()
-    filling = true
-    lock.unlock()
+    let L = Array(UnsafeBufferPointer(start: ch[0], count: frames))
+    let R = buf.format.channelCount > 1 ? Array(UnsafeBufferPointer(start: ch[1], count: frames)) : L
+    let when = at ?? CACurrentMediaTime()
+    write { s in
+      retired.retire([s.fillL, s.fillR], gen: s.gen &+ 1)
+      s.fillL = L
+      s.fillR = R
+      s.fillDur = max(duration, 0.05)
+      s.fillAt = when
+    }
   }
 
   func render(frames: Int, list: UnsafeMutablePointer<AudioBufferList>) {
@@ -1755,58 +1830,55 @@ final class LiveDrums: @unchecked Sendable {
       }
       return outL
     }()
-    if !enabled {
+    if lock.try() {
+      if shared.gen != r.gen {
+        r = shared  // arrays it replaces are held in `retired`, so no free here
+      }
+      seenGen = shared.gen
+      lock.unlock()
+    }
+    let n = r.left.count
+    guard r.enabled, n > 1, r.right.count == n else {
       for i in 0..<frames {
         outL[i] = 0
         if outR != outL { outR[i] = 0 }
       }
+      playhead = nil
       return
     }
-    lock.lock()
-    let n = self.n
-    let L = left
-    let R = right
-    let fillL = self.fillL
-    let fillR = self.fillR
-    let fillN = self.fillN
-    let fillDur = self.fillDur
-    let fillOrigin = self.fillOrigin
-    var filling = self.filling
-    let sr = max(sampleRate, 8000)
-    let dur = max(loopDur, 0.05)
-    let start = cycleStart
-    let drive = self.drive
-    let dirt = self.dirt
-    let vinyl = Double(self.vinyl)
-    lock.unlock()
-    guard n > 1, L.count == n else {
-      for i in 0..<frames {
-        outL[i] = 0
-        if outR != outL { outR[i] = 0 }
-      }
-      return
+    let sr = max(r.sampleRate, 8000)
+    let dur = max(r.loopDur, 0.05)
+    let drive = r.drive
+    let dirt = r.dirt
+    let vinyl = Double(r.vinyl)
+    let fillN = r.fillL.count
+    let fillOK = fillN > 1 && r.fillR.count == fillN
+    // A new cycle origin re-expresses the playhead (same jump the wall clock gave);
+    // otherwise resync only on start or a big slip (interruption, route change).
+    if var p = playhead, r.cycleStart != lastCycleStart {
+      p += lastCycleStart - r.cycleStart
+      playhead = p
     }
+    lastCycleStart = r.cycleStart
+    let wall = CACurrentMediaTime() - r.cycleStart
+    var t0 = playhead ?? wall
+    if abs(t0 - wall) > 0.08 { t0 = wall }
+    playhead = t0 + Double(frames) / sr
+    let fillFrom = r.fillAt - r.cycleStart
     let driveAmt = 1 + drive * 4.5
-    let t0 = CACurrentMediaTime() - start
-    let now = CACurrentMediaTime()
-    let fillingNow = filling && now < fillOrigin + fillDur
-    if filling && now >= fillOrigin + fillDur {
-      self.filling = false
-    }
     for i in 0..<frames {
       let t = t0 + Double(i) / sr
       var x: Float = 0
       var y: Float = 0
-      if fillingNow, fillN > 1 {
-        let ft = now - fillOrigin + Double(i) / sr
-        var fidx = ft / fillDur * Double(fillN)
-        if fidx < 0 { fidx = 0 }
+      let ft = t - fillFrom
+      if fillOK, ft >= 0, ft < r.fillDur {
+        var fidx = ft / r.fillDur * Double(fillN)
         if fidx >= Double(fillN) { fidx = Double(fillN - 1) }
         let i0 = min(fillN - 1, Int(fidx))
         let i1 = min(fillN - 1, i0 + 1)
         let frac = Float(fidx - floor(fidx))
-        x = fillL[i0] * (1 - frac) + fillL[i1] * frac
-        y = fillR[i0] * (1 - frac) + fillR[i1] * frac
+        x = r.fillL[i0] * (1 - frac) + r.fillL[i1] * frac
+        y = r.fillR[i0] * (1 - frac) + r.fillR[i1] * frac
       } else {
         var pos = t.truncatingRemainder(dividingBy: dur)
         if pos < 0 { pos += dur }
@@ -1820,8 +1892,8 @@ final class LiveDrums: @unchecked Sendable {
         let i0 = Int(idx)
         let i1 = (i0 + 1) % n
         let frac = Float(idx - floor(idx))
-        x = L[i0] * (1 - frac) + L[i1] * frac
-        y = R[i0] * (1 - frac) + R[i1] * frac
+        x = r.left[i0] * (1 - frac) + r.left[i1] * frac
+        y = r.right[i0] * (1 - frac) + r.right[i1] * frac
       }
       if drive > 0.01 {
         let g = driveAmt
@@ -1840,12 +1912,12 @@ final class LiveDrums: @unchecked Sendable {
         x += rumble
         y += rumble * 0.9
         if crackle > 0 {
-          let c = Float(crackle) * 0.01 * Float.random(in: -1...1)
+          let c = Float(crackle) * 0.01 * Float(rng.unit() * 2 - 1)
           x += c; y += c
           crackle -= 1
-        } else if Double.random(in: 0..<1) < vinyl * 0.0024 {
-          crackle = Int.random(in: 2...18)
-          let pop = Float.random(in: 0.12...0.35) * (Bool.random() ? 1 : -1)
+        } else if rng.unit() < vinyl * 0.0024 {
+          crackle = 2 + Int(rng.unit() * 17)
+          let pop = Float(0.12 + rng.unit() * 0.23) * (rng.unit() < 0.5 ? 1 : -1)
           x += pop; y += pop
         }
         lp += 0.12 * (x - lp)

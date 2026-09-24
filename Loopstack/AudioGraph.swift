@@ -33,6 +33,44 @@ enum AudioBuf {
   }
 }
 
+/// Holds buffers the render thread may still reference until it has picked up a
+/// newer state, so the final release (and the free) never lands on the render
+/// thread. Control threads retire under their lock and drop the returned batch
+/// after unlocking.
+struct RetireBin {
+  private var items: [(gen: UInt64, obj: Any)] = []
+
+  mutating func retire(_ obj: Any, gen: UInt64) {
+    items.append((gen, obj))
+  }
+
+  /// Everything retired at or before `seen` is no longer referenced by the renderer.
+  mutating func collect(seen: UInt64) -> [Any] {
+    guard !items.isEmpty else { return [] }
+    var dead: [Any] = []
+    items.removeAll { item in
+      if item.gen <= seen {
+        dead.append(item.obj)
+        return true
+      }
+      return false
+    }
+    return dead
+  }
+}
+
+/// Allocation-free xorshift for the render thread (system random can take a lock).
+struct RTRandom {
+  private var s: UInt64 = 0x9E37_79B9_7F4A_7C15
+
+  mutating func unit() -> Double {
+    s ^= s << 13
+    s ^= s >> 7
+    s ^= s << 17
+    return Double(s >> 11) * (1.0 / 9_007_199_254_740_992.0)
+  }
+}
+
 /// Builds render callbacks in a file with no @MainActor types so the audio
 /// thread never hops to the UI. Closures created inside LoopEngine.attachGraph
 /// were isolated to the main actor — that underruns (echoey clicks) and
