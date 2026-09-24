@@ -672,18 +672,24 @@ enum AudioDSP {
     2 / Double.pi * asin(sin(p))
   }
 
+  /// 24-bit PCM WAV: the pro standard for stems and sessions, readable everywhere.
   static func encodeWav(_ buffer: AVAudioPCMBuffer) -> Data {
     let sr = Int(buffer.format.sampleRate)
     let ch = Int(buffer.format.channelCount)
     let n = Int(buffer.frameLength)
-    var samples = Data(count: n * ch * 2)
+    let bytes = 3
+    var samples = Data(count: n * ch * bytes)
     samples.withUnsafeMutableBytes { raw in
-      let dst = raw.bindMemory(to: Int16.self)
+      let dst = raw.bindMemory(to: UInt8.self)
       for i in 0..<n {
         for c in 0..<ch {
           let v = buffer.floatChannelData![c][i]
-          let clamped = max(-1, min(1, v))
-          dst[i * ch + c] = Int16(clamped * 32767)
+          let clamped = Double(max(-1, min(1, v)))
+          let q = Int32((clamped * 8_388_607).rounded())
+          let o = (i * ch + c) * bytes
+          dst[o] = UInt8(truncatingIfNeeded: q)
+          dst[o + 1] = UInt8(truncatingIfNeeded: q >> 8)
+          dst[o + 2] = UInt8(truncatingIfNeeded: q >> 16)
         }
       }
     }
@@ -699,9 +705,9 @@ enum AudioDSP {
     u16(1)
     u16(UInt16(ch))
     u32(UInt32(sr))
-    u32(UInt32(sr * ch * 2))
-    u16(UInt16(ch * 2))
-    u16(16)
+    u32(UInt32(sr * ch * bytes))
+    u16(UInt16(ch * bytes))
+    u16(UInt16(bytes * 8))
     four("data")
     u32(UInt32(samples.count))
     data.append(samples)
