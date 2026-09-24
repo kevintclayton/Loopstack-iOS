@@ -182,6 +182,8 @@ final class LoopEngine: ObservableObject {
   @Published var drumDrive: Float = 0.15
   @Published var drumDirt: Float = 0.12
   @Published var drumVinyl: Float = 0
+  /// Drum room send. 0.35 puts the room ~21 dB under the kit: air, not obvious reverb.
+  @Published var drumRoom: Float = 0.35
   @Published var instrumentGlitch: Float = 0
   @Published var micGain: Float = 0.85
   @Published var layers: [Layer] = []
@@ -264,6 +266,12 @@ final class LoopEngine: ObservableObject {
     componentFlagsMask: 0
   ))
   private let masterOut = AVAudioMixerNode()
+  /// Drum room: post-fader send from the drum bus -> 250 Hz high-pass (keeps the kick
+  /// dry and tight) -> small room, 100% wet -> main.
+  private let drumRoomBus = AVAudioMixerNode()
+  private let drumRoomHighPass = AVAudioUnitEQ(numberOfBands: 1)
+  private let drumRoomVerb = AVAudioUnitReverb()
+  private var drumRoomBusIndex: AVAudioNodeBus = 0
   private let limiterMeter = PeakMeter()
   /// dB the master limiter is currently pulling down (peak-held, falls back gently).
   @Published var limiterReduction: Float = 0
@@ -352,7 +360,21 @@ final class LoopEngine: ObservableObject {
     engine.attach(dnode)
     engine.connect(dnode, to: drumsMixer, format: format)
     drumNode = dnode
-    engine.connect(drumsMixer, to: main, format: format)
+    // Drums: dry to main plus a room send (its level is the Room slider).
+    [drumRoomBus, drumRoomHighPass, drumRoomVerb].forEach { engine.attach($0) }
+    let drumsDry = AVAudioConnectionPoint(node: main, bus: main.nextAvailableInputBus)
+    let drumsRoom = AVAudioConnectionPoint(node: drumRoomBus, bus: drumRoomBus.nextAvailableInputBus)
+    engine.connect(drumsMixer, to: [drumsDry, drumsRoom], fromBus: 0, format: format)
+    drumRoomBusIndex = drumsRoom.bus
+    engine.connect(drumRoomBus, to: drumRoomHighPass, format: format)
+    engine.connect(drumRoomHighPass, to: drumRoomVerb, format: format)
+    engine.connect(drumRoomVerb, to: main, format: format)
+    drumRoomHighPass.bands[0].filterType = .highPass
+    drumRoomHighPass.bands[0].frequency = 250
+    drumRoomHighPass.bands[0].bypass = false
+    drumRoomVerb.loadFactoryPreset(.smallRoom)
+    drumRoomVerb.wetDryMix = 100
+    applyDrumRoom()
     liveMetro.sampleRate = format.sampleRate
     let mnode = AudioGraph.metroNode(format: format, metro: liveMetro)
     engine.attach(mnode)
@@ -555,6 +577,11 @@ final class LoopEngine: ObservableObject {
   func setDrumDrive(_ v: Float) { drumDrive = v; liveDrums.drive = v }
   func setDrumDirt(_ v: Float) { drumDirt = v; liveDrums.dirt = v }
   func setDrumVinyl(_ v: Float) { drumVinyl = v; liveDrums.vinyl = v }
+  func setDrumRoom(_ v: Float) { drumRoom = v; applyDrumRoom() }
+
+  private func applyDrumRoom() {
+    drumsMixer.destination(forMixer: drumRoomBus, bus: drumRoomBusIndex)?.volume = min(1, max(0, drumRoom))
+  }
   func setPreset(_ p: InstrumentPreset) {
     rememberPatch()
     preset = p

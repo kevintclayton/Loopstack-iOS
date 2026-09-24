@@ -767,6 +767,7 @@ struct DrumsView: View {
         FxRow(label: "Drive", value: engine.drumDrive, display: "\(Int(engine.drumDrive * 100))", onChange: engine.setDrumDrive)
         FxRow(label: "Dirt", value: engine.drumDirt, display: "\(Int(engine.drumDirt * 100))", onChange: engine.setDrumDirt)
         FxRow(label: "Vinyl", value: engine.drumVinyl, display: "\(Int(engine.drumVinyl * 100))", onChange: engine.setDrumVinyl)
+        FxRow(label: "Room", value: engine.drumRoom, display: "\(Int(engine.drumRoom * 100))", onChange: engine.setDrumRoom)
       }
     }
   }
