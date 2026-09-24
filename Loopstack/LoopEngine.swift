@@ -429,7 +429,7 @@ final class LoopEngine: ObservableObject {
     engine.mainMixerNode.outputVolume = masterGain
     loopsMixer.outputVolume = 1
     metroMixer.outputVolume = (metronomeOn || status == .countin) ? metroGain : 0
-    drumsMixer.outputVolume = drumsOn ? drumsGain : 0
+    drumsMixer.outputVolume = drumsOn ? drumsGain * Self.drumTrim : 0
     instMixer.outputVolume = instrumentGain
     instMixer.pan = instrumentPan
     micMixer.outputVolume = ((monitorOn || sampleRecording) && micArmed) ? micGain * 0.7 : 0
@@ -1111,6 +1111,10 @@ final class LoopEngine: ObservableObject {
     try? zip.write(to: url)
     return url
   }
+
+  /// Drum patterns are mastered near full scale and sat ~4 dB over the keys; trimming
+  /// them (rather than pushing the instruments up) keeps headroom before the limiter.
+  private static let drumTrim: Float = 0.63  // -4 dB
 
   /// Put beat 0 slightly in the future so the audio thread renders the first click
   /// from its start; an origin of "now" is already past by the first render.
