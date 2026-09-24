@@ -165,6 +165,9 @@ final class LoopEngine: ObservableObject {
   @Published var masterGain: Float = 0.85
   @Published var metroGain: Float = 0.83
   @Published var drumsGain: Float = 0.83
+  /// Group level for all loops, their delay and reverb included. 1 = the level loops
+  /// have always played at.
+  @Published var loopsGain: Float = 1
   @Published var instrumentGain: Float = 0.84
   @Published var instrumentPan: Float = 0
   @Published var instrumentDelay: Float = 0.22
@@ -397,9 +400,11 @@ final class LoopEngine: ObservableObject {
     engine.connect(instPost, to: main, format: format)
     engine.connect(micMixer, to: main, format: format)
     engine.connect(loopDelayBus, to: loopDelay, format: format)
-    engine.connect(loopDelay, to: main, format: format)
+    // Loop effects return through the loops channel so the Loops fader moves the
+    // whole group, tails included.
+    engine.connect(loopDelay, to: loopsMixer, format: format)
     engine.connect(loopReverbBus, to: loopReverb, format: format)
-    engine.connect(loopReverb, to: main, format: format)
+    engine.connect(loopReverb, to: loopsMixer, format: format)
     attachMasterBus(main)
     // The buses carry only per-loop sends, so the effects run fully wet.
     loopDelay.wetDryMix = 100
@@ -496,7 +501,7 @@ final class LoopEngine: ObservableObject {
 
   private func applyGains() {
     engine.mainMixerNode.outputVolume = masterGain
-    loopsMixer.outputVolume = 1
+    loopsMixer.outputVolume = loopsGain
     metroMixer.outputVolume = (metronomeOn || status == .countin) ? metroGain : 0
     drumsMixer.outputVolume = drumsOn ? drumsGain * Self.drumTrim : 0
     instMixer.outputVolume = instrumentGain
@@ -528,6 +533,7 @@ final class LoopEngine: ObservableObject {
   func setMasterGain(_ v: Float) { masterGain = v; applyGains() }
   func setMetroGain(_ v: Float) { metroGain = v; applyGains() }
   func setDrumsGain(_ v: Float) { drumsGain = v; applyGains() }
+  func setLoopsGain(_ v: Float) { loopsGain = v; applyGains() }
   func setInstrumentGain(_ v: Float) { instrumentGain = v; rememberPatch(); applyGains() }
   func setMicGain(_ v: Float) { micGain = v; applyGains() }
   func setMetronomeOn(_ on: Bool) {

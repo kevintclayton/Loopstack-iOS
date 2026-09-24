@@ -795,6 +795,7 @@ struct MixView: View {
       }
       mix("Master", engine.masterGain) { engine.setMasterGain($0) }
       mix("Keys", engine.instrumentGain) { engine.setInstrumentGain($0) }
+      mix("Loops", engine.loopsGain) { engine.setLoopsGain($0) }
       mix("Drums", engine.drumsGain) { engine.setDrumsGain($0) }
       mix("Metronome", engine.metroGain) { engine.setMetroGain($0) }
     }
