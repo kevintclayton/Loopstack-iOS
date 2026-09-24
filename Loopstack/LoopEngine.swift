@@ -246,6 +246,8 @@ final class LoopEngine: ObservableObject {
   private var busyVoices: [Int: AVAudioPlayerNode] = [:]
   private var layerSlots: [LayerSlot] = []
   private var cycleStart: TimeInterval = 0
+  /// Transport position (seconds into the cycle) to resume from after pause.
+  private var resumePosition: TimeInterval = 0
   private var lastCycleIndex = -1
   private var lastBarIndex = -1
 
@@ -263,9 +265,11 @@ final class LoopEngine: ObservableObject {
   private let captureState = CaptureState()
   private let liveSynth = LiveSynth()
   private var synthNode: AVAudioSourceNode?
-  private let liveDrums = LiveDrums()
+  /// One timeline for drums and loops.
+  private let transportClock = TransportClock()
+  private lazy var liveDrums = LiveDrums(clock: transportClock)
   private var drumNode: AVAudioSourceNode?
-  private let liveLayers = LiveLayers()
+  private lazy var liveLayers = LiveLayers(clock: transportClock)
   private let liveMetro = LiveMetro()
   private var metroNode: AVAudioSourceNode?
   private let liveSampler = LiveSampler()
@@ -756,21 +760,39 @@ final class LoopEngine: ObservableObject {
     setBpm(Int((60 / avg).rounded()))
   }
 
+  /// Play resumes from where pause left off (the top after stop), with drums,
+  /// metronome and every loop placed on the same timeline.
   func play() {
     ensureRunning()
     if status == .idle {
-      if layers.isEmpty { beginCycle() }
+      // Status first: rescheduleDrums (via beginCycle) only enables drums while running.
       status = .playing
-      liveLayers.setTransportPlaying(true)
+      beginCycle(at: CACurrentMediaTime() + Self.clickLead - resumePosition)
+      resumePosition = 0
+      liveLayers.restartAll()
     } else {
-      stop()
+      pause()
     }
   }
 
+  private func pause() {
+    let pos = max(0, CACurrentMediaTime() - cycleStart).truncatingRemainder(dividingBy: max(loopDuration, 0.05))
+    stop()
+    resumePosition = pos
+  }
+
   func stop() {
+    // Discard an unfinished take. Left alone, the engine kept filling it and later
+    // started it as a loop with no row in the UI.
+    if let slot = captureSlot {
+      liveLayers.clear(index: slot.index)
+      slot.busy = false
+      captureSlot = nil
+    }
     capturing = false
     status = .idle
     position = 0
+    resumePosition = 0
     liveDrums.enabled = false
     liveMetro.stop()
     liveLayers.setTransportPlaying(false)
@@ -794,6 +816,7 @@ final class LoopEngine: ObservableObject {
       }
       status = .recording
       beginCycle(at: CACurrentMediaTime() + Self.clickLead)
+      liveLayers.restartAll()
       startCapture()
       applyGains()
       return
@@ -1083,7 +1106,7 @@ final class LoopEngine: ObservableObject {
   private func beginCycle(at start: TimeInterval? = nil) {
     cycleStart = start ?? CACurrentMediaTime()
     lastCycleIndex = 0
-    liveDrums.cycleStart = cycleStart
+    transportClock.set(cycleStart: cycleStart, sampleRate: format.sampleRate)
     liveDrums.loopDur = loopDuration
     liveLayers.setClock(start: cycleStart, dur: loopDuration, sampleRate: format.sampleRate)
     rescheduleDrums()
@@ -1155,6 +1178,7 @@ final class LoopEngine: ObservableObject {
         status = .recording
         // Start on the count-in grid, not whenever this 50ms tick noticed.
         beginCycle(at: cycleStart + MetroTiming.countInDuration(bpm: Double(bpm)))
+        liveLayers.restartAll()
         startCapture()
         applyGains()
       }
@@ -1307,7 +1331,6 @@ final class LoopEngine: ObservableObject {
     liveDrums.drive = drumDrive
     liveDrums.dirt = drumDirt
     liveDrums.vinyl = drumVinyl
-    liveDrums.cycleStart = cycleStart
     liveDrums.loopDur = loopDuration
     liveDrums.sampleRate = format.sampleRate
     guard drumsOn, running else {
@@ -1815,7 +1838,6 @@ final class LiveDrums: @unchecked Sendable {
   private struct Shared {
     var enabled = false
     var sampleRate: Double = 44100
-    var cycleStart: TimeInterval = 0
     var loopDur: Double = 1
     var drive: Float = 0.15
     var dirt: Float = 0.12
@@ -1835,12 +1857,12 @@ final class LiveDrums: @unchecked Sendable {
   private var retired = RetireBin()
   private var seenGen: UInt64 = 0
 
+  /// Shared with the loops so drums and loops read one timeline. Reading the wall
+  /// clock every callback jittered the drums by a millisecond or two.
+  private let clock: TransportClock
+
   // Render-thread state.
   private var r = Shared()
-  /// Seconds since cycleStart, advanced by exact frame counts. Reading the wall
-  /// clock every callback jittered the loop position by a millisecond or two.
-  private var playhead: Double?
-  private var lastCycleStart: TimeInterval = 0
   private var crackle = 0
   private var prev: Float = 0
   private var lp: Float = 0
@@ -1853,10 +1875,6 @@ final class LiveDrums: @unchecked Sendable {
   var sampleRate: Double {
     get { read { $0.sampleRate } }
     set { write { $0.sampleRate = newValue } }
-  }
-  var cycleStart: TimeInterval {
-    get { read { $0.cycleStart } }
-    set { write { $0.cycleStart = newValue } }
   }
   var loopDur: Double {
     get { read { $0.loopDur } }
@@ -1873,6 +1891,10 @@ final class LiveDrums: @unchecked Sendable {
   var vinyl: Float {
     get { read { $0.vinyl } }
     set { write { $0.vinyl = newValue } }
+  }
+
+  init(clock: TransportClock) {
+    self.clock = clock
   }
 
   private func read<T>(_ f: (Shared) -> T) -> T {
@@ -1922,7 +1944,7 @@ final class LiveDrums: @unchecked Sendable {
     }
   }
 
-  func render(frames: Int, list: UnsafeMutablePointer<AudioBufferList>) {
+  func render(frames: Int, list: UnsafeMutablePointer<AudioBufferList>, timestamp: UnsafePointer<AudioTimeStamp>?) {
     let buffers = UnsafeMutableAudioBufferListPointer(list)
     guard frames > 0, let data = buffers.first?.mData else { return }
     let outL = data.assumingMemoryBound(to: Float.self)
@@ -1932,6 +1954,7 @@ final class LiveDrums: @unchecked Sendable {
       }
       return outL
     }()
+    let now = clock.time(timestamp, frames: frames)
     if lock.try() {
       if shared.gen != r.gen {
         r = shared  // arrays it replaces are held in `retired`, so no free here
@@ -1945,7 +1968,6 @@ final class LiveDrums: @unchecked Sendable {
         outL[i] = 0
         if outR != outL { outR[i] = 0 }
       }
-      playhead = nil
       return
     }
     let sr = max(r.sampleRate, 8000)
@@ -1955,21 +1977,18 @@ final class LiveDrums: @unchecked Sendable {
     let vinyl = Double(r.vinyl)
     let fillN = r.fillL.count
     let fillOK = fillN > 1 && r.fillR.count == fillN
-    // A new cycle origin re-expresses the playhead (same jump the wall clock gave);
-    // otherwise resync only on start or a big slip (interruption, route change).
-    if var p = playhead, r.cycleStart != lastCycleStart {
-      p += lastCycleStart - r.cycleStart
-      playhead = p
-    }
-    lastCycleStart = r.cycleStart
-    let wall = CACurrentMediaTime() - r.cycleStart
-    var t0 = playhead ?? wall
-    if abs(t0 - wall) > 0.08 { t0 = wall }
-    playhead = t0 + Double(frames) / sr
-    let fillFrom = r.fillAt - r.cycleStart
+    let t0 = now.t
+    let fillFrom = r.fillAt - now.cycleStart
     let driveAmt = 1 + drive * 4.5
     for i in 0..<frames {
       let t = t0 + Double(i) / sr
+      // Before the transport start (the short lead-in) stay silent rather than
+      // playing the end of the pattern.
+      if t < 0 {
+        outL[i] = 0
+        if outR != outL { outR[i] = 0 }
+        continue
+      }
       var x: Float = 0
       var y: Float = 0
       let ft = t - fillFrom

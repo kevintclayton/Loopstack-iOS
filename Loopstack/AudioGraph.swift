@@ -71,6 +71,64 @@ struct RTRandom {
   }
 }
 
+/// One transport timeline for drums and loops, so they can't disagree.
+///
+/// Time comes from the render timestamp's sample time, which is the same for every
+/// node in a render cycle, anchored to the wall clock whenever the transport
+/// (re)starts. The main thread sets the cycle start under `lock`; the render thread
+/// reads it with `lock.try()` and never waits.
+final class TransportClock: @unchecked Sendable {
+  private let lock = NSLock()
+  private var sharedStart: TimeInterval = 0
+  private var sharedRate: Double = 44100
+  private var sharedGen: UInt64 = 0
+
+  // Render thread only.
+  private var start: TimeInterval = 0
+  private var rate: Double = 44100
+  private var gen: UInt64 = 0
+  private var anchor: (key: Double, t: Double)?
+  private var fallbackKey: Double = 0
+
+  /// Main thread: a new cycle origin (transport start / restart).
+  func set(cycleStart: TimeInterval, sampleRate: Double) {
+    lock.lock()
+    sharedStart = cycleStart
+    sharedRate = max(sampleRate, 8000)
+    sharedGen &+= 1
+    lock.unlock()
+  }
+
+  /// Render thread. Seconds since cycle start at the first frame of this buffer,
+  /// and the cycle start it is measured from.
+  func time(_ ts: UnsafePointer<AudioTimeStamp>?, frames: Int) -> (t: Double, cycleStart: TimeInterval, rate: Double) {
+    if lock.try() {
+      if sharedGen != gen {
+        gen = sharedGen
+        start = sharedStart
+        rate = sharedRate
+        anchor = nil  // re-anchor to the wall clock on every transport start
+      }
+      lock.unlock()
+    }
+    let key: Double
+    if let ts, ts.pointee.mFlags.contains(.sampleTimeValid) {
+      key = ts.pointee.mSampleTime
+    } else {
+      key = fallbackKey
+      fallbackKey += Double(frames)
+    }
+    let wall = CACurrentMediaTime() - start
+    if let a = anchor {
+      let t = a.t + (key - a.key) / rate
+      if abs(t - wall) < 0.08 { return (t, start, rate) }
+    }
+    // First use after a start, or a big slip (interruption, route change).
+    anchor = (key, wall)
+    return (wall, start, rate)
+  }
+}
+
 /// Builds render callbacks in a file with no @MainActor types so the audio
 /// thread never hops to the UI. Closures created inside LoopEngine.attachGraph
 /// were isolated to the main actor — that underruns (echoey clicks) and
@@ -103,16 +161,16 @@ enum AudioGraph {
   static func layerNode(format: AVAudioFormat, layers: LiveLayers, slot: Int) -> AVAudioSourceNode {
     let layers = layers
     let slot = slot
-    return AVAudioSourceNode(format: format) { _, _, frameCount, abl -> OSStatus in
-      layers.render(slot: slot, frames: Int(frameCount), list: abl)
+    return AVAudioSourceNode(format: format) { _, ts, frameCount, abl -> OSStatus in
+      layers.render(slot: slot, frames: Int(frameCount), list: abl, timestamp: ts)
       return noErr
     }
   }
 
   static func drumsNode(format: AVAudioFormat, drums: LiveDrums) -> AVAudioSourceNode {
     let drums = drums
-    return AVAudioSourceNode(format: format) { _, _, frameCount, abl -> OSStatus in
-      drums.render(frames: Int(frameCount), list: abl)
+    return AVAudioSourceNode(format: format) { _, ts, frameCount, abl -> OSStatus in
+      drums.render(frames: Int(frameCount), list: abl, timestamp: ts)
       return noErr
     }
   }

@@ -20,9 +20,11 @@ final class LiveLayers: @unchecked Sendable {
     var muted = false
     var reversed = false
     var active = false
-    /// Bumped whenever playback should restart from 0 (activation, replacement).
+    /// Bumped whenever playback should (re)start (activation, transport start, replacement).
     var activation = 0
     var activatedAt: TimeInterval = 0
+    /// Place the loop on the transport timeline (transport start) rather than at 0.
+    var align = false
   }
 
   /// Render-thread copy of a slot plus its playhead.
@@ -39,6 +41,11 @@ final class LiveLayers: @unchecked Sendable {
     var active = false
     var activation = 0
     var playhead = 0
+    /// Where in the cycle (seconds) this loop's first sample plays; learned the first
+    /// time it plays, then used to place it whenever the transport starts.
+    var phase: Double = 0
+    /// Frames of silence before the transport's start time arrives.
+    var wait = 0
   }
 
   /// Slot count is fixed, so index checks outside the lock don't read `slots`.
@@ -52,6 +59,8 @@ final class LiveLayers: @unchecked Sendable {
   private var complete = false
   private var sampleRate: Double = 44100
   private var gen: UInt64 = 0
+  /// Shared with the drums: loops are placed on the same timeline.
+  private let clock: TransportClock
   private var seenGen: UInt64 = 0
   private var retired = RetireBin()
 
@@ -59,11 +68,17 @@ final class LiveLayers: @unchecked Sendable {
   private var voices: [Voice] = Array(repeating: Voice(), count: slotRange.count)
   private var renderGen: UInt64 = 0
 
+  init(clock: TransportClock) {
+    self.clock = clock
+  }
+
+  /// The transport timeline itself lives in the shared TransportClock; only the
+  /// rate is needed here.
   func setClock(start: TimeInterval, dur: Double, sampleRate: Double) {
-    // Only the rate is used (to place late-synced loops); the transport clock isn't.
     _ = start; _ = dur
     lock.lock()
     self.sampleRate = max(sampleRate, 8000)
+    changed()
     lock.unlock()
   }
 
@@ -156,7 +171,21 @@ final class LiveLayers: @unchecked Sendable {
     slots[i].active = true
     slots[i].activation &+= 1
     slots[i].activatedAt = CACurrentMediaTime()
+    slots[i].align = false
     changed()
+  }
+
+  /// Transport start (play/resume/record from stop): every recorded loop is placed
+  /// on the transport timeline set by `setClock`, together with drums and metronome.
+  func restartAll() {
+    lock.lock()
+    for i in slots.indices where slots[i].n > 1 {
+      slots[i].active = true
+      slots[i].activation &+= 1
+      slots[i].align = true
+    }
+    changed()
+    lock.unlock()
   }
 
   /// Short fade at both ends of a take so the first entry and every wrap
@@ -244,8 +273,9 @@ final class LiveLayers: @unchecked Sendable {
 
   func setTransportPlaying(_ on: Bool) {
     lock.lock()
+    // Mute is handled in render (silent but still advancing), not by deactivating.
     for i in slots.indices {
-      if slots[i].n > 1 { slots[i].active = on && !slots[i].muted }
+      if slots[i].n > 1 { slots[i].active = on }
     }
     changed()
     lock.unlock()
@@ -269,17 +299,36 @@ final class LiveLayers: @unchecked Sendable {
   }
 
   /// Lock held, render thread. Copies what changed; array assignments only retain.
-  private func syncVoices() {
+  /// `transportT` is the shared transport time at this buffer's first frame.
+  private func syncVoices(transportT: Double) {
     let sr = sampleRate
     let now = CACurrentMediaTime()
     for i in slots.indices {
       let s = slots[i]
       if s.activation != voices[i].activation {
         voices[i].activation = s.activation
-        // Normally 0. If the lock was busy when the loop started, pick up where it
-        // should be now instead of starting late and staying late.
-        let late = now - s.activatedAt
-        voices[i].playhead = s.active && late > 0.005 ? Int(late * sr) : 0
+        voices[i].wait = 0
+        let period = Double(max(s.n, 1)) / sr
+        if s.align {
+          // Transport start: silent until the start time, then at this loop's place in the cycle.
+          var t = transportT
+          if t < 0 {
+            voices[i].wait = Int((-t * sr).rounded())
+            t = 0
+          }
+          var pos = (t - voices[i].phase).truncatingRemainder(dividingBy: period)
+          if pos < 0 { pos += period }
+          voices[i].playhead = min(max(0, Int((pos * sr).rounded())), max(0, s.n - 1))
+        } else {
+          // Normally 0. If the lock was busy when the loop started, pick up where it
+          // should be now instead of starting late and staying late.
+          let late = now - s.activatedAt
+          voices[i].playhead = s.active && late > 0.005 ? Int(late * sr) : 0
+          // Remember where in the cycle its first sample plays.
+          var ph = (transportT - Double(voices[i].playhead) / sr).truncatingRemainder(dividingBy: period)
+          if ph < 0 { ph += period }
+          voices[i].phase = ph
+        }
       }
       voices[i].n = s.n
       voices[i].gain = s.gain
@@ -305,7 +354,7 @@ final class LiveLayers: @unchecked Sendable {
 
   /// Renders one slot. Each loop has its own source node so the engine can give it
   /// its own delay/reverb send levels.
-  func render(slot si: Int, frames: Int, list: UnsafeMutablePointer<AudioBufferList>) {
+  func render(slot si: Int, frames: Int, list: UnsafeMutablePointer<AudioBufferList>, timestamp: UnsafePointer<AudioTimeStamp>?) {
     let buffers = UnsafeMutableAudioBufferListPointer(list)
     guard frames > 0, let data = buffers.first?.mData else { return }
     let outL = data.assumingMemoryBound(to: Float.self)
@@ -316,24 +365,40 @@ final class LiveLayers: @unchecked Sendable {
       return outL
     }()
     AudioBuf.zero(list, frames: frames)
+    let transportT = clock.time(timestamp, frames: frames).t
     if lock.try() {
-      if gen != renderGen { syncVoices() }
+      if gen != renderGen { syncVoices(transportT: transportT) }
       lock.unlock()
     }
-    guard voices.indices.contains(si), voices[si].active, !voices[si].muted, voices[si].n > 1 else { return }
+    guard voices.indices.contains(si), voices[si].active, voices[si].n > 1 else { return }
     let n = voices[si].n
+    var wait = voices[si].wait
+    var head = voices[si].playhead
+    if voices[si].muted {
+      // Keep time while muted so it's in step when unmuted.
+      let w = min(wait, frames)
+      wait -= w
+      head += frames - w
+      voices[si].wait = wait
+      voices[si].playhead = head
+      return
+    }
     let a = voices[si].reversed && voices[si].revL.count == n ? voices[si].revL : voices[si].left
     let b = voices[si].reversed && voices[si].revR.count == n ? voices[si].revR : voices[si].right
     guard a.count == n, b.count == n else { return }
     let gl = voices[si].gain * min(1, max(0, 1 - voices[si].pan))
     let gr = voices[si].gain * min(1, max(0, 1 + voices[si].pan))
-    var head = voices[si].playhead
     for i in 0..<frames {
+      if wait > 0 {
+        wait -= 1
+        continue
+      }
       let idx = head % n
       outL[i] += a[idx] * gl
       if outR != outL { outR[i] += b[idx] * gr }
       head += 1
     }
+    voices[si].wait = wait
     voices[si].playhead = head
   }
 }
