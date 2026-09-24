@@ -132,7 +132,7 @@ enum AudioDSP {
     let sixteenth = beatSec / 4
     let repeats = max(1, loopBars / max(1, pattern.bars))
     var rng = DrumRng(seed: drumSeed(pattern, bpm: bpm, bars: loopBars))
-    struct Placed { var t: Double; var vel: Float; var voice: DrumVoice }
+    struct Placed { var t: Double; var vel: Float; var voice: DrumVoice; var pan: DrumPan }
     var placed: [Placed] = []
     placed.reserveCapacity(pattern.hits.count * repeats)
     for rep in 0..<repeats {
@@ -144,7 +144,7 @@ enum AudioDSP {
         }
         var vel = hit.vel
         humanize(hit.voice, t: &t, vel: &vel, rng: &rng)
-        placed.append(Placed(t: t, vel: vel, voice: hit.voice))
+        placed.append(Placed(t: t, vel: vel, voice: hit.voice, pan: DrumPan.kit(hit.voice, step: hit.step)))
       }
     }
     placed.sort { a, b in
@@ -161,19 +161,24 @@ enum AudioDSP {
         chokeOpenHats(oL, oR, from: at, frames: frames, sr: sampleRate)
       }
       if acoustic {
-        let n = AcousticKit.mix(hit.voice, vel: hit.vel, destL, destR, frames, sampleRate, at)
+        let n = AcousticKit.mix(hit.voice, vel: hit.vel, destL, destR, frames, sampleRate, at, pan: hit.pan)
         if n == 0 {
-          renderVoice(hit.voice, destL, destR, frames, sampleRate, at, hit.vel)
+          renderVoice(hit.voice, destL, destR, frames, sampleRate, at, hit.vel, pan: hit.pan)
         }
       } else {
-        renderVoice(hit.voice, destL, destR, frames, sampleRate, at, hit.vel)
+        renderVoice(hit.voice, destL, destR, frames, sampleRate, at, hit.vel, pan: hit.pan)
       }
     }
     for i in 0..<frames {
       L[i] += oL[i]
       R[i] += oR[i]
     }
-    if let g = fixedGain {
+    if acoustic {
+      // Recorded drums peak far above their body. Instead of turning the whole pattern
+      // down to fit the loudest spike, catch the spikes (like a mix engineer would), so
+      // the kit sits at the electronic kit's level. Deterministic, so jam phrases match.
+      limitDrums(L, R, frames, sampleRate, preGain: acousticPreGain)
+    } else if let g = fixedGain {
       // Jam phrases use the groove's own level so a loud fill can't dip a whole phrase.
       if g != 1 {
         for i in 0..<frames {
@@ -185,6 +190,56 @@ enum AudioDSP {
       normalize(L, R, frames)
     }
     return buf
+  }
+
+  /// Drive into the acoustic kit's limiter. With voices punch-matched, 1.7 brings acoustic
+  /// patterns within ~1.4 dB of the electronic kit while limiting >1 dB only ~9% of the
+  /// time (transients); the kit stays a touch more dynamic, like real drums.
+  static let acousticPreGain: Float = 1.7
+  /// Fast release so a caught transient barely ducks the rest of the kit (~0.1 s at most).
+  static let drumLimiterRelease: Double = 0.025
+
+  /// Offline lookahead peak limiter for rendered drums: stereo-linked, 1.5 ms lookahead
+  /// (the gain eases down before a transient, no clipping), 25 ms release, ceiling 0.98.
+  static func limitDrums(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, preGain: Float) {
+    guard frames > 0 else { return }
+    let ceiling: Float = 0.98
+    let la = max(1, Int(sr * 0.0015))
+    // Gain each sample needs on its own.
+    var need = [Float](repeating: 1, count: frames)
+    for i in 0..<frames {
+      let p = max(abs(L[i]), abs(R[i])) * preGain
+      if p > ceiling { need[i] = ceiling / p }
+    }
+    // Lookahead: the lowest gain needed within the next `la` samples.
+    var ahead = [Float](repeating: 1, count: frames)
+    var deque: [Int] = []
+    deque.reserveCapacity(la + 1)
+    var head = 0
+    var j = 0
+    for i in 0..<frames {
+      while j < frames, j <= i + la {
+        while deque.count > head, need[deque[deque.count - 1]] >= need[j] { deque.removeLast() }
+        deque.append(j)
+        j += 1
+      }
+      while deque[head] < i { head += 1 }
+      ahead[i] = need[deque[head]]
+      if head > 4096 { deque.removeFirst(head); head = 0 }
+    }
+    // Ramp into it (moving average over the lookahead keeps the peak under the ceiling),
+    // then release slowly.
+    let rel = Float(1 - exp(-1 / (drumLimiterRelease * sr)))
+    var sum: Float = 0
+    var g: Float = 1
+    for i in 0..<frames {
+      sum += ahead[i]
+      if i >= la { sum -= ahead[i - la] }
+      let avg = sum / Float(min(i + 1, la))
+      g = avg <= g ? avg : g + (avg - g) * rel
+      L[i] *= preGain * g
+      R[i] *= preGain * g
+    }
   }
 
   /// The gain `renderPattern` would normalize this groove with (1 if it doesn't clip).
@@ -209,7 +264,8 @@ enum AudioDSP {
     gain: Float,
     pitch: Float = 1,
     tone: Float = 1,
-    maxSec: Double = 12
+    maxSec: Double = 12,
+    pan: DrumPan = .center
   ) -> Int {
     guard let src = sample.floatChannelData, gain != 0 else { return 0 }
     let sn = Int(sample.frameLength)
@@ -243,8 +299,8 @@ enum AudioDSP {
         var env: Float = 1
         if written < 4 { env = Float(written) / 4 }
         if tail < fadeN { env *= Float(tail) / Float(fadeN) }
-        L[dst] += sL * g * env
-        R[dst] += sR * g * env
+        L[dst] += sL * g * env * pan.l
+        R[dst] += sR * g * env * pan.r
       }
       srcPos += step
       written += 1
@@ -390,16 +446,16 @@ enum AudioDSP {
   }
 
 
-  static func renderVoice(_ voice: DrumVoice, _ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
+  static func renderVoice(_ voice: DrumVoice, _ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float, pan: DrumPan = .center) {
     switch voice {
-    case .kick: kick(L, R, frames, sr, at, vel)
-    case .snare: snare(L, R, frames, sr, at, vel)
-    case .hat: hat(L, R, frames, sr, at, vel, open: false)
-    case .ohat: hat(L, R, frames, sr, at, vel, open: true)
-    case .clap: clap(L, R, frames, sr, at, vel)
-    case .rim: rim(L, R, frames, sr, at, vel)
-    case .tom: tom(L, R, frames, sr, at, vel)
-    case .perc: perc(L, R, frames, sr, at, vel)
+    case .kick: kick(L, R, frames, sr, at, vel, pan: pan)
+    case .snare: snare(L, R, frames, sr, at, vel, pan: pan)
+    case .hat: hat(L, R, frames, sr, at, vel, open: false, pan: pan)
+    case .ohat: hat(L, R, frames, sr, at, vel, open: true, pan: pan)
+    case .clap: clap(L, R, frames, sr, at, vel, pan: pan)
+    case .rim: rim(L, R, frames, sr, at, vel, pan: pan)
+    case .tom: tom(L, R, frames, sr, at, vel, pan: pan)
+    case .perc: perc(L, R, frames, sr, at, vel, pan: pan)
     }
   }
 
@@ -409,7 +465,7 @@ enum AudioDSP {
     R[i] += r
   }
 
-  private static func kick(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
+  private static func kick(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float, pan: DrumPan) {
     let v = Double(max(0.05, vel))
     let n = Int(sr * (0.22 + 0.28 * v))
     var phase = 0.0
@@ -429,11 +485,11 @@ enum AudioDSP {
         s = tanh(s * (1.0 + (v - 0.75) * 1.4))
       }
       let out = Float(s)
-      write(L, R, frames, at + i, out, out)
+      write(L, R, frames, at + i, out * pan.l, out * pan.r)
     }
   }
 
-  private static func tom(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
+  private static func tom(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float, pan: DrumPan) {
     let v = Double(max(0.05, vel))
     let n = Int(sr * (0.14 + 0.24 * v))
     var phase = 0.0
@@ -446,11 +502,11 @@ enum AudioDSP {
       phase += (2 * Double.pi * freq) / sr
       let noise = Double(white()) * exp(-t * (50 + 20 * v)) * (0.08 + 0.18 * v)
       let s = Float((sin(phase) * env + noise) * amp * 0.72)
-      write(L, R, frames, at + i, s * 0.85, s * 1.05)
+      write(L, R, frames, at + i, s * pan.l, s * pan.r)
     }
   }
 
-  private static func snare(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
+  private static func snare(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float, pan: DrumPan) {
     let v = Double(max(0.05, vel))
     let n = Int(sr * (0.10 + 0.16 * v))
     var phase = 0.0
@@ -469,11 +525,11 @@ enum AudioDSP {
       lp += lpA * ((raw - hp) - lp)
       let noise = Double(lp) * exp(-t * (16 - 7 * v))
       let s = Float((body * bodyMix + noise * noiseMix) * amp * 0.7)
-      write(L, R, frames, at + i, s * 1.05, s * 0.95)
+      write(L, R, frames, at + i, s * pan.l, s * pan.r)
     }
   }
 
-  private static func clap(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
+  private static func clap(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float, pan: DrumPan) {
     let v = Double(max(0.05, vel))
     let delays: [Double]
     if v < 0.35 {
@@ -495,12 +551,12 @@ enum AudioDSP {
         let raw = white()
         lp += lpA * (raw - lp)
         let s = lp * Float(exp(-t * decay)) * Float(amp * 0.46)
-        write(L, R, frames, start + i, s * 0.95, s * 1.05)
+        write(L, R, frames, start + i, s * pan.l, s * pan.r)
       }
     }
   }
 
-  private static func hat(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float, open: Bool) {
+  private static func hat(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float, open: Bool, pan: DrumPan) {
     let v = Double(max(0.05, vel))
     let n = Int(sr * (open ? (0.14 + 0.20 * v) : (0.026 + 0.042 * v)))
     let decay = open ? (12.0 - 5.0 * v) : (58.0 - 20.0 * v)
@@ -515,11 +571,11 @@ enum AudioDSP {
       let high = raw - hp
       lp += lpA * (high - lp)
       let s = lp * Float(exp(-t * decay)) * Float(amp)
-      write(L, R, frames, at + i, s * 0.78, s * 1.22)
+      write(L, R, frames, at + i, s * pan.l, s * pan.r)
     }
   }
 
-  private static func rim(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
+  private static func rim(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float, pan: DrumPan) {
     let v = Double(max(0.05, vel))
     let n = Int(sr * (0.028 + 0.022 * v))
     var p1 = 0.0
@@ -533,11 +589,11 @@ enum AudioDSP {
       p2 += (2 * Double.pi * (1180 + 220 * v)) / sr
       let click = Double(white()) * exp(-t * 140) * (0.08 + 0.2 * v)
       let s = Float((sin(p1) * (1 - highMix * 0.35) + sin(p2) * highMix + click) * env * amp * 0.38)
-      write(L, R, frames, at + i, s, s)
+      write(L, R, frames, at + i, s * pan.l, s * pan.r)
     }
   }
 
-  private static func perc(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
+  private static func perc(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float, pan: DrumPan) {
     let v = Double(max(0.05, vel))
     let n = Int(sr * (0.07 + 0.09 * v))
     var phase = 0.0
@@ -550,7 +606,7 @@ enum AudioDSP {
       phase += (2 * Double.pi * freq) / sr
       let noise = Double(white()) * exp(-t * (48 - 12 * v)) * (0.12 + 0.32 * v)
       let s = Float((sin(phase) * env + noise) * amp * 0.48)
-      write(L, R, frames, at + i, s * 1.15, s * 0.8)
+      write(L, R, frames, at + i, s * pan.l, s * pan.r)
     }
   }
 
@@ -897,5 +953,41 @@ struct DrumColor {
     }
     x = max(-1, min(1, x))
     y = max(-1, min(1, y))
+  }
+}
+
+
+/// Stereo placement for a drum hit: constant-power pan law, normalised so a centred
+/// voice is exactly unity on both sides (no level change for kick and snare).
+struct DrumPan {
+  var l: Float
+  var r: Float
+
+  static let center = DrumPan(l: 1, r: 1)
+
+  /// -1 = hard left, 0 = centre, +1 = hard right.
+  init(_ position: Float) {
+    let a = Double((max(-1, min(1, position)) + 1) * Float.pi / 4)
+    l = Float(cos(a) * 2.0.squareRoot())
+    r = Float(sin(a) * 2.0.squareRoot())
+  }
+
+  private init(l: Float, r: Float) {
+    self.l = l
+    self.r = r
+  }
+
+  /// Audience-perspective kit: kick, snare, rim and clap centred; hi-hats 30% right;
+  /// perc 35% left to balance them; toms sweep from 30% right (high) to 35% left
+  /// (floor) across the bar, so fills move down the kit like a drummer's.
+  static func kit(_ voice: DrumVoice, step: Int) -> DrumPan {
+    switch voice {
+    case .kick, .snare, .rim, .clap: return .center
+    case .hat, .ohat: return DrumPan(0.3)
+    case .perc: return DrumPan(-0.35)
+    case .tom:
+      let pos = Float(((step % 16) + 16) % 16) / 15
+      return DrumPan(0.3 - 0.65 * pos)
+    }
   }
 }

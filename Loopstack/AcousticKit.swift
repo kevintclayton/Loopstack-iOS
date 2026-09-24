@@ -87,23 +87,46 @@ enum AcousticKit {
     _ R: UnsafeMutablePointer<Float>,
     _ frames: Int,
     _ sr: Double,
-    _ at: Int
+    _ at: Int,
+    pan: DrumPan = .center
   ) -> Int {
     if !isLoaded { return 0 }
     let hits = pick(voice, vel: vel)
     guard !hits.isEmpty else { return 0 }
+    let trim = levelTrim(voice)
     var written = 0
     for play in hits {
       let n = AudioDSP.mixSample(
         play.buf, L, R, frames, sr, at,
-        gain: play.gain,
+        gain: play.gain * trim,
         pitch: play.pitch,
         tone: play.tone,
-        maxSec: play.maxSec
+        maxSec: play.maxSec,
+        pan: pan
       )
       written = max(written, n)
     }
     return written
+  }
+
+  /// Per-voice gain so each acoustic voice hits as hard as its electronic counterpart:
+  /// matched on punch (the loudest 50 ms of a hit, how loud a drum sounds) at the
+  /// velocities that carry a groove, 0.8 and 1.0. A single overall boost would have made
+  /// the hats harsh and left rim and perc buried. Soft hits keep the samples' wider
+  /// natural dynamics.
+  private static func levelTrim(_ voice: DrumVoice) -> Float {
+    let dB: Float
+    switch voice {
+    case .kick: dB = 7.8
+    case .snare: dB = 7.5
+    case .hat: dB = -0.3
+    case .ohat: dB = 1.3
+    case .clap: dB = 4.7
+    case .rim: dB = 20.7
+    case .tom: dB = 12.8
+    case .perc: dB = 21.3
+    }
+    return powf(10, dB / 20)
   }
 
   private struct Play {
