@@ -1137,6 +1137,7 @@ final class LoopEngine: ObservableObject {
     if audioRunning != runningNow { audioRunning = runningNow }
     liveDrums.collect()
     liveLayers.collect()
+    liveSampler.collect()
     if sessionRecording {
       sessionElapsed = CACurrentMediaTime() - sessionStarted
     }
