@@ -511,6 +511,7 @@ final class LoopEngine: ObservableObject {
   }
   func setJam(_ on: Bool) {
     jamMode = on
+    if running { rescheduleDrums() }
   }
   func setAcousticKit(_ on: Bool) {
     acousticKit = on
@@ -1265,8 +1266,8 @@ final class LoopEngine: ObservableObject {
     let cycleIndex = Int(floor(elapsed / dur))
     if cycleIndex != lastCycleIndex {
       lastCycleIndex = cycleIndex
-      if cycleIndex > 0, !closedTake { onLoopBoundary() }
     }
+    jamTick(now: now)
     let barIndex = Int(floor(position * Double(bars)))
     if barIndex != lastBarIndex {
       lastBarIndex = barIndex
@@ -1362,19 +1363,6 @@ final class LoopEngine: ObservableObject {
     }
   }
 
-  private func onLoopBoundary() {
-    if drumsOn, jamMode {
-      pickRandomDrum()
-      rescheduleDrums()
-    }
-  }
-
-  private func pickRandomDrum() {
-    let others = drums.filter { $0.id != drumId }
-    guard let next = others.randomElement() else { return }
-    drumId = next.id
-  }
-
   private func beginFill(at barLine: TimeInterval? = nil) {
     fillArmed = false
     guard drumsOn, let fill = DrumLibrary.fills.randomElement() else { return }
@@ -1396,12 +1384,14 @@ final class LoopEngine: ObservableObject {
     liveDrums.drive = drumDrive
     liveDrums.dirt = drumDirt
     liveDrums.vinyl = drumVinyl
-    liveDrums.loopDur = loopDuration
     liveDrums.sampleRate = format.sampleRate
     guard drumsOn, running else {
       liveDrums.enabled = false
+      jamReset()
       return
     }
+    // The plain groove plays straight away; in jam mode the first phrase replaces
+    // it seamlessly once rendered (same grid, same bar).
     let buf = AudioDSP.renderPattern(
       DrumLibrary.find(drumId),
       bpm: Double(bpm),
@@ -1409,8 +1399,120 @@ final class LoopEngine: ObservableObject {
       format: format,
       acoustic: acousticKit
     )
-    liveDrums.setDry(buf)
+    liveDrums.setDry(buf, loopDur: loopDuration)
     liveDrums.enabled = true
+    jamReset()
+    if jamMode { jamTick(now: CACurrentMediaTime()) }
+  }
+
+  // MARK: Jam
+
+  /// Phrase planning for jam mode. Phrase k covers bars 8k..<8k+8 from cycleStart;
+  /// groove m (16 bars) covers phrases 2m and 2m+1.
+  private struct JamState {
+    var token = 0
+    var session: UInt64 = 0
+    var grooves: [Int: String] = [:]
+    var loaded: Int?
+    var queued: Int?
+    var rendering: Set<Int> = []
+    var bpm = 0
+  }
+  private var jam = JamState()
+
+  private var jamPhraseDur: Double { Double(Jam.phraseBars * 4) * 60 / Double(bpm) }
+
+  /// Forget planned phrases (new groove picked, tempo/kit change, stop/start).
+  private func jamReset() {
+    jam = JamState(token: jam.token &+ 1, session: UInt64.random(in: 1...UInt64.max), bpm: bpm)
+  }
+
+  private func jamGroove(_ m: Int) -> String {
+    if let g = jam.grooves[m] { return g }
+    // The groove the user picked anchors the first groove this jam plays.
+    guard let base = jam.grooves.keys.filter({ $0 < m }).max() else {
+      jam.grooves[m] = drumId
+      return drumId
+    }
+    var id = jam.grooves[base]!
+    for i in (base + 1)...m {
+      var rng = JamRng(seed: jam.session &+ UInt64(i) &* 0x9E37_79B9)
+      id = Jam.nextGroove(after: id, rng: &rng)
+      jam.grooves[i] = id
+    }
+    return id
+  }
+
+  /// Called from the UI tick while jamming: keep the current phrase loaded, render the
+  /// next one ahead of time, and promote it once it's playing.
+  private func jamTick(now: TimeInterval) {
+    guard jamMode, drumsOn, running, status != .countin else { return }
+    // Tempo changed (possible before loops lock it): re-plan at the new tempo.
+    guard jam.bpm == bpm else {
+      rescheduleDrums()
+      return
+    }
+    let P = jamPhraseDur
+    let t = now - cycleStart
+    guard t > -1 else { return }
+    let k = max(0, Int(floor(t / P)))
+    if let q = jam.queued, t >= Double(q) * P + 0.05 {
+      liveDrums.promoteNext()
+      jam.loaded = q
+      jam.queued = nil
+      showJamGroove(phrase: q)
+    }
+    if jam.loaded != k, jam.queued != k { jamRender(phrase: k) }
+    let lead = min(P * 0.5, 3.0)
+    if jam.loaded != k + 1, jam.queued != k + 1, Double(k + 1) * P - t < lead {
+      jamRender(phrase: k + 1)
+    }
+  }
+
+  private func jamRender(phrase k: Int) {
+    guard !jam.rendering.contains(k) else { return }
+    jam.rendering.insert(k)
+    let token = jam.token
+    let groove = DrumLibrary.find(jamGroove(k / Jam.phrasesPerGroove))
+    var rng = JamRng(seed: jam.session ^ (UInt64(k) &* 0xBF58_476D_1CE4_E5B9))
+    let fill = DrumLibrary.fills[Int(rng.unit() * Double(DrumLibrary.fills.count)) % DrumLibrary.fills.count]
+    let seed = rng.next()
+    let bpm = Double(self.bpm)
+    let format = self.format
+    let acoustic = acousticKit
+    let P = jamPhraseDur
+    DispatchQueue.global(qos: .userInitiated).async {
+      let gain = AudioDSP.grooveGain(groove, bpm: bpm, format: format, acoustic: acoustic)
+      let phrase = Jam.phrase(groove: groove, fill: fill, seed: seed)
+      let buf = AudioDSP.renderPattern(phrase, bpm: bpm, loopBars: Jam.phraseBars, format: format, acoustic: acoustic, fixedGain: gain)
+      DispatchQueue.main.async {
+        self.jamRendered(phrase: k, buf: buf, token: token, phraseDur: P)
+      }
+    }
+  }
+
+  private func jamRendered(phrase k: Int, buf: AVAudioPCMBuffer, token: Int, phraseDur P: Double) {
+    guard token == jam.token, jamMode, drumsOn, running else { return }
+    jam.rendering.remove(k)
+    let now = CACurrentMediaTime()
+    let kNow = max(0, Int(floor((now - cycleStart) / P)))
+    if k > kNow {
+      // Ahead of time: switch exactly on its first bar line.
+      liveDrums.queueNext(buf, at: cycleStart + Double(k) * P, loopDur: P)
+      jam.queued = k
+    } else if k == kNow {
+      // Needed now (jam start, or a render that ran late): the grid lines up either way.
+      liveDrums.setDry(buf, loopDur: P)
+      jam.loaded = k
+      if jam.queued == k { jam.queued = nil }
+      showJamGroove(phrase: k)
+    }
+  }
+
+  /// Show the groove that's playing (without re-rendering: this isn't a user pick).
+  private func showJamGroove(phrase k: Int) {
+    let id = jamGroove(k / Jam.phrasesPerGroove)
+    if drumId != id { drumId = id }
   }
 
   private func rescheduleMetro() {
@@ -1925,6 +2027,12 @@ final class LiveDrums: @unchecked Sendable {
     var fillDur: Double = 0
     /// Wall time the fill starts (the bar line), so a late UI tick doesn't delay it.
     var fillAt: TimeInterval = 0
+    /// Next buffer, switched in sample-accurately at `nextAt` (wall time). Jam mode
+    /// queues each phrase this way; the main thread promotes it once it's playing.
+    var nextL: [Float] = []
+    var nextR: [Float] = []
+    var nextDur: Double = 1
+    var nextAt: TimeInterval = .infinity
     var gen: UInt64 = 0
   }
 
@@ -1993,15 +2101,50 @@ final class LiveDrums: @unchecked Sendable {
     write { _ in }
   }
 
-  func setDry(_ buf: AVAudioPCMBuffer) {
+  /// Replaces the playing buffer now (and its loop length, together, so the
+  /// renderer never pairs a buffer with the wrong length). Drops any queued next.
+  func setDry(_ buf: AVAudioPCMBuffer, loopDur: Double? = nil) {
     let frames = Int(buf.frameLength)
     guard frames > 0, let ch = buf.floatChannelData else { return }
     let L = Array(UnsafeBufferPointer(start: ch[0], count: frames))
     let R = buf.format.channelCount > 1 ? Array(UnsafeBufferPointer(start: ch[1], count: frames)) : L
     write { s in
-      retired.retire([s.left, s.right], gen: s.gen &+ 1)
+      retired.retire([s.left, s.right, s.nextL, s.nextR], gen: s.gen &+ 1)
       s.left = L
       s.right = R
+      if let loopDur { s.loopDur = loopDur }
+      s.nextL = []
+      s.nextR = []
+      s.nextAt = .infinity
+    }
+  }
+
+  /// Queues a buffer to take over at wall time `at`, to the sample.
+  func queueNext(_ buf: AVAudioPCMBuffer, at: TimeInterval, loopDur: Double) {
+    let frames = Int(buf.frameLength)
+    guard frames > 0, let ch = buf.floatChannelData else { return }
+    let L = Array(UnsafeBufferPointer(start: ch[0], count: frames))
+    let R = buf.format.channelCount > 1 ? Array(UnsafeBufferPointer(start: ch[1], count: frames)) : L
+    write { s in
+      retired.retire([s.nextL, s.nextR], gen: s.gen &+ 1)
+      s.nextL = L
+      s.nextR = R
+      s.nextDur = max(loopDur, 0.05)
+      s.nextAt = at
+    }
+  }
+
+  /// Main thread, once the queued buffer is playing: make it the current one.
+  func promoteNext() {
+    write { s in
+      guard s.nextAt.isFinite, s.nextL.count > 1 else { return }
+      retired.retire([s.left, s.right], gen: s.gen &+ 1)
+      s.left = s.nextL
+      s.right = s.nextR
+      s.loopDur = s.nextDur
+      s.nextL = []
+      s.nextR = []
+      s.nextAt = .infinity
     }
   }
 
@@ -2047,16 +2190,36 @@ final class LiveDrums: @unchecked Sendable {
       return
     }
     let sr = max(r.sampleRate, 8000)
-    let dur = max(r.loopDur, 0.05)
+    let t0 = now.t
+    // Frames before the queued switch play the current buffer, the rest the next one.
+    let nN = r.nextL.count
+    var split = frames
+    if nN > 1, r.nextR.count == nN, r.nextAt.isFinite {
+      let from = r.nextAt - now.cycleStart
+      split = min(frames, max(0, Int(ceil((from - t0) * sr))))
+    }
+    let fillFrom = r.fillAt - now.cycleStart
+    if split > 0 {
+      renderSpan(0..<split, t0: t0, sr: sr, L: r.left, R: r.right, dur: max(r.loopDur, 0.05), fillFrom: fillFrom, outL: outL, outR: outR)
+    }
+    if split < frames {
+      renderSpan(split..<frames, t0: t0, sr: sr, L: r.nextL, R: r.nextR, dur: r.nextDur, fillFrom: fillFrom, outL: outL, outR: outR)
+    }
+  }
+
+  /// Render thread. Arrays are passed in so the per-sample loop doesn't retain them.
+  private func renderSpan(
+    _ span: Range<Int>, t0: Double, sr: Double, L: [Float], R: [Float], dur: Double,
+    fillFrom: Double, outL: UnsafeMutablePointer<Float>, outR: UnsafeMutablePointer<Float>
+  ) {
+    let n = L.count
     let drive = r.drive
     let dirt = r.dirt
     let vinyl = Double(r.vinyl)
     let fillN = r.fillL.count
     let fillOK = fillN > 1 && r.fillR.count == fillN
-    let t0 = now.t
-    let fillFrom = r.fillAt - now.cycleStart
     let driveAmt = 1 + drive * 4.5
-    for i in 0..<frames {
+    for i in span {
       let t = t0 + Double(i) / sr
       // Before the transport start (the short lead-in) stay silent rather than
       // playing the end of the pattern.
@@ -2089,8 +2252,8 @@ final class LiveDrums: @unchecked Sendable {
         let i0 = Int(idx)
         let i1 = (i0 + 1) % n
         let frac = Float(idx - floor(idx))
-        x = r.left[i0] * (1 - frac) + r.left[i1] * frac
-        y = r.right[i0] * (1 - frac) + r.right[i1] * frac
+        x = L[i0] * (1 - frac) + L[i1] * frac
+        y = R[i0] * (1 - frac) + R[i1] * frac
       }
       if drive > 0.01 {
         let g = driveAmt

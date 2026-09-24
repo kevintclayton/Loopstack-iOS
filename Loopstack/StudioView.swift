@@ -751,7 +751,7 @@ struct DrumsView: View {
       }
       Text(
         engine.jamMode
-          ? "Picks a new kit on every downbeat."
+          ? "Varies the groove every bar, plays a half-bar fill every 8 bars, and moves to a related groove every 16."
           : "Starts on the loop downbeat. Fill plays a 1-bar break on the next bar."
       )
         .font(.system(size: 13))

@@ -504,3 +504,128 @@ enum DrumLibrary {
     ]),
   ]
 }
+
+/// Jam mode: plays the groove the way a drummer would, in 8-bar phrases.
+/// - Every bar after the first: subtle variation of the same groove (hat density,
+///   accents, open hat, ghost snares). The kick on 1 and the backbeat never move.
+/// - Bar 4 ends with a pickup; bar 8's second half is a half-bar fill.
+/// - Every 16 bars, right after a fill, a new groove from the same family.
+enum Jam {
+  static let phraseBars = 8
+  static let phrasesPerGroove = 2  // 16 bars
+
+  /// Grooves that can follow each other without the song lurching style.
+  private static let families: [[String]] = [
+    ["floor", "techno", "acid", "industrial"],
+    ["pocket", "boombap", "dilla", "brush", "shuffle"],
+    ["break", "dnb", "garage", "wrecked"],
+    ["halftime", "trap", "footwork"],
+    ["clave", "world", "dembow"],
+    ["punk"],
+  ]
+
+  static func family(of id: String) -> [String] {
+    families.first { $0.contains(id) } ?? [id]
+  }
+
+  /// A different groove from the same family, or the same one if it has no siblings.
+  static func nextGroove(after id: String, rng: inout JamRng) -> String {
+    let others = family(of: id).filter { $0 != id }
+    guard !others.isEmpty else { return id }
+    return others[Int(rng.unit() * Double(others.count)) % others.count]
+  }
+
+  /// One 8-bar phrase of `groove`, with `fill`'s second half in the last half bar.
+  static func phrase(groove g: DrumPattern, fill: DrumPattern, seed: UInt64) -> DrumPattern {
+    var rng = JamRng(seed: seed)
+    let fourFloor = family(of: g.id).contains("floor")
+    var hits: [DrumHit] = []
+    for bar in 0..<phraseBars {
+      let src = bar % max(1, g.bars)
+      var h = g.hits
+        .filter { $0.step / 16 == src }
+        .map { DrumHit(step: $0.step % 16, voice: $0.voice, vel: $0.vel) }
+      // Bar 1 of each phrase states the groove plainly.
+      if bar > 0 { vary(&h, rng: &rng) }
+      if bar == 3 { pickup(&h, fourFloor: fourFloor, rng: &rng) }
+      if bar == phraseBars - 1 {
+        h = h.filter { $0.step < 8 } + fill.hits.filter { $0.step >= 8 && $0.step < 16 }
+      }
+      hits += h.map { DrumHit(step: $0.step + bar * 16, voice: $0.voice, vel: $0.vel) }
+    }
+    return DrumPattern(id: "\(g.id)-jam-\(seed)", name: g.name, feel: g.feel, bars: phraseBars, swing: g.swing, hits: hits)
+  }
+
+  private static func has(_ h: [DrumHit], _ step: Int, _ voices: Set<DrumVoice>) -> Bool {
+    h.contains { $0.step == step && voices.contains($0.voice) }
+  }
+
+  /// Subtle, groove-preserving changes. Only hats, open hats and ghost notes are
+  /// added or moved; kick and backbeat hits are left where they are.
+  private static func vary(_ h: inout [DrumHit], rng: inout JamRng) {
+    // Accent drift: hats breathe a little, everything else barely moves.
+    for i in h.indices {
+      let amt: Double = h[i].voice == .hat ? 0.14 : 0.04
+      h[i].vel = max(0.05, min(1, h[i].vel * Float(1 + (rng.unit() * 2 - 1) * amt)))
+    }
+    let hats = h.filter { $0.voice == .hat }
+    if !hats.isEmpty, rng.unit() < 0.3 {
+      let sixteenths = hats.contains { $0.step % 2 == 1 }
+      if sixteenths {
+        // Thin one off-16th.
+        let odd = h.indices.filter { h[$0].voice == .hat && h[$0].step % 2 == 1 }
+        if let i = odd.randomElement(using: &rng) { h.remove(at: i) }
+      } else {
+        // Add one or two soft 16ths.
+        for _ in 0..<(rng.unit() < 0.5 ? 1 : 2) {
+          if let s = [3, 7, 11, 15].filter({ !has(h, $0, [.hat, .ohat]) }).randomElement(using: &rng) {
+            h.append(DrumHit(step: s, voice: .hat, vel: Float(0.28 + rng.unit() * 0.14)))
+          }
+        }
+      }
+    }
+    if !hats.isEmpty, rng.unit() < 0.2 {
+      // Open hat on the "and" of 4.
+      if let i = h.firstIndex(where: { $0.step == 14 && $0.voice == .hat }) {
+        h[i] = DrumHit(step: 14, voice: .ohat, vel: h[i].vel * 0.9)
+      } else if !has(h, 14, [.ohat]) {
+        h.append(DrumHit(step: 14, voice: .ohat, vel: 0.5))
+      }
+    }
+    if rng.unit() < 0.25 {
+      // Ghost snare in a gap.
+      if let s = [7, 9, 15, 3].filter({ !has(h, $0, [.snare, .clap, .kick]) }).randomElement(using: &rng) {
+        h.append(DrumHit(step: s, voice: .snare, vel: Float(0.14 + rng.unit() * 0.1)))
+      }
+    }
+  }
+
+  /// End-of-bar-4 pickup into the second half of the phrase.
+  private static func pickup(_ h: inout [DrumHit], fourFloor: Bool, rng: inout JamRng) {
+    guard rng.unit() < 0.75 else { return }
+    if fourFloor {
+      // A kick pickup breaks four-on-the-floor; an open hat lifts it instead.
+      if let i = h.firstIndex(where: { $0.step == 14 && $0.voice == .hat }) {
+        h[i] = DrumHit(step: 14, voice: .ohat, vel: 0.6)
+      } else if !has(h, 14, [.ohat]) {
+        h.append(DrumHit(step: 14, voice: .ohat, vel: 0.55))
+      }
+    } else if let s = [14, 15].filter({ !has(h, $0, [.kick]) }).randomElement(using: &rng) {
+      h.append(DrumHit(step: s, voice: .kick, vel: Float(0.55 + rng.unit() * 0.2)))
+    }
+  }
+}
+
+/// Seeded random for jam phrases (reproducible per phrase, no system random).
+struct JamRng: RandomNumberGenerator {
+  private var s: UInt64
+  init(seed: UInt64) { s = seed == 0 ? 0x9E37_79B9_7F4A_7C15 : seed }
+  mutating func next() -> UInt64 {
+    s &+= 0x9E37_79B9_7F4A_7C15
+    var z = s
+    z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+    z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+    return z ^ (z >> 31)
+  }
+  mutating func unit() -> Double { Double(next() >> 11) * 0x1.0p-53 }
+}

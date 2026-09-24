@@ -109,7 +109,8 @@ enum AudioDSP {
     bpm: Double,
     loopBars: Int,
     format: AVAudioFormat,
-    acoustic: Bool = false
+    acoustic: Bool = false,
+    fixedGain: Float? = nil
   ) -> AVAudioPCMBuffer {
     let sampleRate = format.sampleRate
     let duration = Double(loopBars * 4) * 60 / bpm
@@ -172,8 +173,29 @@ enum AudioDSP {
       L[i] += oL[i]
       R[i] += oR[i]
     }
-    normalize(L, R, frames)
+    if let g = fixedGain {
+      // Jam phrases use the groove's own level so a loud fill can't dip a whole phrase.
+      if g != 1 {
+        for i in 0..<frames {
+          L[i] *= g
+          R[i] *= g
+        }
+      }
+    } else {
+      normalize(L, R, frames)
+    }
     return buf
+  }
+
+  /// The gain `renderPattern` would normalize this groove with (1 if it doesn't clip).
+  static func grooveGain(_ pattern: DrumPattern, bpm: Double, format: AVAudioFormat, acoustic: Bool) -> Float {
+    let b = renderPattern(pattern, bpm: bpm, loopBars: max(1, pattern.bars), format: format, acoustic: acoustic, fixedGain: 1)
+    var peak: Float = 0
+    for c in 0..<Int(b.format.channelCount) {
+      let p = b.floatChannelData![c]
+      for i in 0..<Int(b.frameLength) { peak = max(peak, abs(p[i])) }
+    }
+    return peak > 1 ? 1 / peak : 1
   }
 
   @discardableResult
