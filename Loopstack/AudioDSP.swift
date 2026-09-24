@@ -371,7 +371,7 @@ enum AudioDSP {
 
   /// Drive, dirt, and vinyl (wow/flutter, rumble, crackle) — not a noise pad.
   /// Offline drum colouring for export: the same chain and crackle as live playback.
-  static func colorDrums(_ buf: AVAudioPCMBuffer, drive: Float, dirt: Float, vinyl: Float, crackle: [Float]) {
+  static func colorDrums(_ buf: AVAudioPCMBuffer, drive: Float, dirt: Float, vinyl: Float, comp: Float, crackle: [Float]) {
     let n = Int(buf.frameLength)
     guard n > 16, let data = buf.floatChannelData else { return }
     let sr = buf.format.sampleRate
@@ -388,10 +388,11 @@ enum AudioDSP {
       var x = srcL[i0] * (1 - frac) + srcL[i0 + 1] * frac
       var y = srcR[i0] * (1 - frac) + srcR[i0 + 1] * frac
       let c = crackle.count == n ? crackle[i0] * (1 - frac) + crackle[i0 + 1] * frac : 0
-      chain.process(&x, &y, crackle: c, drive: drive, dirt: dirt, vinyl: vinyl)
+      chain.process(&x, &y, crackle: c, drive: drive, dirt: dirt, vinyl: vinyl, comp: comp, sampleRate: sr)
       L[i] = x
       if R != L { R[i] = y }
     }
+    normalize(L, R, n)
   }
 
   /// One pattern-length of record surface: soft band-limited ticks, the odd low pop,
@@ -913,6 +914,19 @@ struct DrumColor {
   private var lpL: Float = 0
   private var lpR: Float = 0
   private var prev: Float = 0
+  // Parallel compressor state.
+  private var env: Float = 0
+  private var coefRate: Double = 0
+  private var rel: Float = 0
+
+  /// Parallel ("New York") drum compression: a heavily compressed copy is blended under
+  /// the untouched kit, so transients stay intact and the body (snare sustain, room,
+  /// hat detail) comes up. Clean: no saturation. Stereo-linked, instant attack (the copy
+  /// must lose its transients, or it adds them back with makeup and spikes the peaks),
+  /// 100 ms release, 8:1 above -28 dBFS with a 6 dB soft knee.
+  static let compThresholdDB: Float = -28
+  static let compRatio: Float = 8
+  static let compMakeupDB: Float = 20
 
   /// Record-speed wobble in seconds of displacement: wow ~0.32 Hz up to ±0.3% pitch,
   /// flutter 13 Hz up to ±0.1%, at full Vinyl. (Was scaled by loop length before.)
@@ -922,7 +936,7 @@ struct DrumColor {
     return v * (sin(2 * Double.pi * 0.32 * t) * 0.0015 + sin(2 * Double.pi * 13 * t) * 0.000012)
   }
 
-  mutating func process(_ x: inout Float, _ y: inout Float, crackle c: Float, drive: Float, dirt: Float, vinyl: Float) {
+  mutating func process(_ x: inout Float, _ y: inout Float, crackle c: Float, drive: Float, dirt: Float, vinyl: Float, comp: Float = 0, sampleRate sr: Double = 48000) {
     let v = max(0, min(1, vinyl))
     if v > 0.001 {
       // Surface noise sits under the drums, in the same "sample".
@@ -939,6 +953,27 @@ struct DrumColor {
       x = x * (1 - v * 0.45) + lpL * v * 0.45
       y = y * (1 - v * 0.45) + lpR * v * 0.45
     }
+    if comp > 0.001 {
+      if sr != coefRate {
+        coefRate = sr
+        rel = Float(1 - exp(-1 / (0.1 * sr)))
+      }
+      let level = max(abs(x), abs(y))
+      env = level > env ? level : env + rel * (level - env)
+      let over = 20 * log10f(max(env, 1e-6)) - Self.compThresholdDB
+      let slope = 1 - 1 / Self.compRatio
+      let grDB: Float
+      if over <= -3 {
+        grDB = 0
+      } else if over < 3 {
+        grDB = -slope * (over + 3) * (over + 3) / 12
+      } else {
+        grDB = -slope * over
+      }
+      let g = powf(10, (grDB + Self.compMakeupDB) / 20) * min(1, comp)
+      x += x * g
+      y += y * g
+    }
     if drive > 0.01 {
       let g = 1 + drive * 4.5
       x = tanhf(x * g) / tanhf(g)
@@ -951,8 +986,10 @@ struct DrumColor {
       y += hp * dirt * 0.18
       x += tanhf(x * x * x * (2 + dirt * 4)) * dirt * 0.18
     }
-    x = max(-1, min(1, x))
-    y = max(-1, min(1, y))
+    // Loose safety only: the parallel blend can peak a little over full scale, which the
+    // drum bus trim and the master limiter handle (a hard clip here would distort it).
+    x = max(-4, min(4, x))
+    y = max(-4, min(4, y))
   }
 }
 

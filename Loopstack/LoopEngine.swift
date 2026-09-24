@@ -185,8 +185,12 @@ final class LoopEngine: ObservableObject {
   @Published var osc2Octave: Int = 0
   @Published var cutoff: Float = 0.78
   @Published var resonance: Float = 0.08
-  @Published var drumDrive: Float = 0.15
-  @Published var drumDirt: Float = 0.12
+  /// Drive and Dirt start clean; they're character to add, not a default colour.
+  @Published var drumDrive: Float = 0
+  @Published var drumDirt: Float = 0
+  /// Clean parallel compression (separate from Drive's grit). The default gives the kit
+  /// the body the old default Drive used to add, without the distortion.
+  @Published var drumComp: Float = 0.5
   @Published var drumVinyl: Float = 0
   /// Drum room send. 0.35 puts the room ~21 dB under the kit: air, not obvious reverb.
   @Published var drumRoom: Float = 0.35
@@ -732,6 +736,7 @@ final class LoopEngine: ObservableObject {
   func setDrumDrive(_ v: Float) { drumDrive = v; liveDrums.drive = v }
   func setDrumDirt(_ v: Float) { drumDirt = v; liveDrums.dirt = v }
   func setDrumVinyl(_ v: Float) { drumVinyl = v; liveDrums.vinyl = v }
+  func setDrumComp(_ v: Float) { drumComp = v; liveDrums.comp = v }
   func setDrumRoom(_ v: Float) { drumRoom = v; applyDrumRoom() }
 
   private func applyDrumRoom() {
@@ -1343,7 +1348,7 @@ final class LoopEngine: ObservableObject {
     if drumsOn {
       let pattern = DrumLibrary.find(drumId)
       let buf = AudioDSP.renderPattern(pattern, bpm: Double(bpm), loopBars: bars, format: format, acoustic: acousticKit)
-      AudioDSP.colorDrums(buf, drive: drumDrive, dirt: drumDirt, vinyl: drumVinyl,
+      AudioDSP.colorDrums(buf, drive: drumDrive, dirt: drumDirt, vinyl: drumVinyl, comp: drumComp,
                           crackle: vinylTrack(for: pattern, frames: Int(buf.frameLength), bpm: Double(bpm), sampleRate: format.sampleRate))
       files.append(("Drums - \(pattern.name).wav", AudioDSP.encodeWav(buf)))
     }
@@ -1368,6 +1373,8 @@ final class LoopEngine: ObservableObject {
 
   /// Drum patterns are mastered near full scale and sat ~4 dB over the keys; trimming
   /// them (rather than pushing the instruments up) keeps headroom before the limiter.
+  /// Set by ear with the kit's default body (now from clean Comp at 0.5, which lifts it
+  /// the same ~3.5 dB the old default Drive did); it also absorbs Comp's ~2 dB peak rise.
   private static let drumTrim: Float = 0.63  // -4 dB
 
   /// Put beat 0 slightly in the future so the audio thread renders the first click
@@ -1591,6 +1598,7 @@ final class LoopEngine: ObservableObject {
     liveDrums.drive = drumDrive
     liveDrums.dirt = drumDirt
     liveDrums.vinyl = drumVinyl
+    liveDrums.comp = drumComp
     liveDrums.sampleRate = format.sampleRate
     guard drumsOn, running else {
       liveDrums.enabled = false
@@ -2235,9 +2243,10 @@ final class LiveDrums: @unchecked Sendable {
     var enabled = false
     var sampleRate: Double = 44100
     var loopDur: Double = 1
-    var drive: Float = 0.15
-    var dirt: Float = 0.12
+    var drive: Float = 0
+    var dirt: Float = 0
     var vinyl: Float = 0
+    var comp: Float = 0
     var left: [Float] = []
     var right: [Float] = []
     /// Record surface for this buffer, read at the same position as the drums.
@@ -2293,6 +2302,10 @@ final class LiveDrums: @unchecked Sendable {
   var vinyl: Float {
     get { read { $0.vinyl } }
     set { write { $0.vinyl = newValue } }
+  }
+  var comp: Float {
+    get { read { $0.comp } }
+    set { write { $0.comp = newValue } }
   }
 
   init(clock: TransportClock) {
@@ -2440,6 +2453,7 @@ final class LiveDrums: @unchecked Sendable {
     let drive = r.drive
     let dirt = r.dirt
     let vinyl = r.vinyl
+    let comp = r.comp
     let fillN = r.fillL.count
     let fillOK = fillN > 1 && r.fillR.count == fillN
     let perSec = Double(n) / dur
@@ -2478,7 +2492,7 @@ final class LiveDrums: @unchecked Sendable {
         y = R[i0] * (1 - frac) + R[i1] * frac
       }
       let c: Float = hasCrackle ? C[i0] * (1 - frac) + C[i1] * frac : 0
-      color.process(&x, &y, crackle: c, drive: drive, dirt: dirt, vinyl: vinyl)
+      color.process(&x, &y, crackle: c, drive: drive, dirt: dirt, vinyl: vinyl, comp: comp, sampleRate: sr)
       outL[i] = x
       if outR != outL { outR[i] = y }
     }
