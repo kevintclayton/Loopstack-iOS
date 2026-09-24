@@ -776,9 +776,13 @@ struct MixView: View {
   @ObservedObject var engine: LoopEngine
   var body: some View {
     card {
-      Text("Mix")
-        .font(.system(size: 18, weight: .semibold))
-        .foregroundStyle(LS.fg)
+      HStack {
+        Text("Mix")
+          .font(.system(size: 18, weight: .semibold))
+          .foregroundStyle(LS.fg)
+        Spacer()
+        LimiterLight(reduction: engine.limiterReduction)
+      }
       mix("Master", engine.masterGain) { engine.setMasterGain($0) }
       mix("Keys", engine.instrumentGain) { engine.setInstrumentGain($0) }
       mix("Drums", engine.drumsGain) { engine.setDrumsGain($0) }
@@ -935,6 +939,33 @@ struct PeakView: View {
       }
     }
     .frame(height: 48)
+  }
+}
+
+/// Lights when the master limiter is pulling the mix down: accent for light
+/// limiting, red past 3 dB (squashing punch; pull the master or loops down).
+private struct LimiterLight: View {
+  var reduction: Float
+
+  private var color: Color {
+    if reduction >= 3 { return LS.record }
+    if reduction >= 0.3 { return LS.accent }
+    return LS.subtle.opacity(0.5)
+  }
+
+  var body: some View {
+    HStack(spacing: 6) {
+      Circle()
+        .fill(color)
+        .frame(width: 8, height: 8)
+      Text(reduction >= 0.3 ? String(format: "LIMIT -%.1f dB", reduction) : "LIMIT")
+        .font(.system(size: 11, weight: .medium, design: .monospaced))
+        .tracking(1.2)
+        .foregroundStyle(reduction >= 0.3 ? color : LS.subtle)
+    }
+    .animation(.easeOut(duration: 0.15), value: reduction >= 3)
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel(reduction >= 0.3 ? String(format: "Limiter reducing %.1f decibels", reduction) : "Limiter idle")
   }
 }
 

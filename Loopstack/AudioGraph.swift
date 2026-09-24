@@ -1,4 +1,5 @@
 import AVFoundation
+import Accelerate
 import Foundation
 
 enum AudioBuf {
@@ -129,6 +130,34 @@ final class TransportClock: @unchecked Sendable {
   }
 }
 
+/// Peak level feeding the master limiter, collected on the tap thread and read by
+/// the UI tick. The limiter's threshold is 0 dBFS, so anything above 1.0 here is
+/// how much it's pulling the mix down.
+final class PeakMeter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var peak: Float = 0
+
+  func add(_ buffer: AVAudioPCMBuffer) {
+    guard let ch = buffer.floatChannelData, buffer.frameLength > 0 else { return }
+    var m: Float = 0
+    for c in 0..<Int(buffer.format.channelCount) {
+      var v: Float = 0
+      vDSP_maxmgv(ch[c], 1, &v, vDSP_Length(buffer.frameLength))
+      m = max(m, v)
+    }
+    lock.lock()
+    peak = max(peak, m)
+    lock.unlock()
+  }
+
+  /// Highest peak since the last call.
+  func take() -> Float {
+    lock.lock()
+    defer { peak = 0; lock.unlock() }
+    return peak
+  }
+}
+
 /// Builds render callbacks in a file with no @MainActor types so the audio
 /// thread never hops to the UI. Closures created inside LoopEngine.attachGraph
 /// were isolated to the main actor — that underruns (echoey clicks) and
@@ -147,6 +176,14 @@ enum AudioGraph {
       synth.render(frames: Int(frameCount), list: abl)
       sampler.renderAdd(frames: Int(frameCount), list: abl, dstRate: outRate)
       return noErr
+    }
+  }
+
+  /// Meters the signal going into the master limiter for the limiter light.
+  static func installMeterTap(on node: AVAudioNode, format: AVAudioFormat, meter: PeakMeter) {
+    let meter = meter
+    node.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+      meter.add(buffer)
     }
   }
 

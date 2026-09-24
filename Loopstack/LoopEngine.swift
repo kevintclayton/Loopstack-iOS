@@ -264,6 +264,9 @@ final class LoopEngine: ObservableObject {
     componentFlagsMask: 0
   ))
   private let masterOut = AVAudioMixerNode()
+  private let limiterMeter = PeakMeter()
+  /// dB the master limiter is currently pulling down (peak-held, falls back gently).
+  @Published var limiterReduction: Float = 0
   private let drumsPlayer = AVAudioPlayerNode()
   private let metroPlayer = AVAudioPlayerNode()
   private var voicePool: [AVAudioPlayerNode] = []
@@ -413,6 +416,17 @@ final class LoopEngine: ObservableObject {
     applyInstrumentSpace()
   }
 
+  /// Instant on a new peak, then falls ~12 dB/s so short hits stay visible.
+  private func updateLimiterLight() {
+    let peak = limiterMeter.take()
+    let reduction = peak > 1 ? 20 * log10f(peak) : 0
+    var shown = max(reduction, limiterReduction - 0.6)
+    if shown < 0.05 { shown = 0 }
+    if abs(shown - limiterReduction) > 0.05 || (shown == 0 && limiterReduction != 0) {
+      limiterReduction = shown
+    }
+  }
+
   /// Apple's lookahead peak limiter keeps the mix from clipping. Measured offline:
   /// transparent below 0 dBFS, no overs with +7 dB transients, <0.2% THD on
   /// limited bass at 3 ms attack (which is also the added latency).
@@ -442,6 +456,7 @@ final class LoopEngine: ObservableObject {
     AudioUnitSetParameter(au, kLimiterParam_PreGain, kAudioUnitScope_Global, 0, 0, 0)
     // The limiter holds 0 dBFS; trim 1 dB for DAC and inter-sample headroom.
     masterOut.outputVolume = 0.891
+    AudioGraph.installMeterTap(on: masterHighPass, format: format, meter: limiterMeter)
   }
 
   private func startSilentPull() {
@@ -1207,6 +1222,7 @@ final class LoopEngine: ObservableObject {
   private func tick() {
     let runningNow = engine.isRunning
     if audioRunning != runningNow { audioRunning = runningNow }
+    updateLimiterLight()
     liveDrums.collect()
     liveLayers.collect()
     liveSampler.collect()
