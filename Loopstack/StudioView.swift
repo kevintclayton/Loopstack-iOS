@@ -501,6 +501,7 @@ struct InstrumentView: View {
         }
         FxRow(label: "Ring", value: engine.instrumentRing, display: "\(Int(engine.instrumentRing * 100))", onChange: engine.setInstrumentRing)
         FxRow(label: "Rel", value: engine.instrumentRelease, display: releaseLabel(engine.instrumentRelease), onChange: engine.setInstrumentRelease)
+        FxRow(label: "Tape", value: engine.instrumentTape, display: "\(Int(engine.instrumentTape * 100))", onChange: engine.setInstrumentTape)
       }
     }
   }

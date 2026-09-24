@@ -41,6 +41,8 @@ struct InstrumentPatch: Codable, Equatable {
   var resonance: Float = 0.12
   /// Release slider 0...1; nil (older saved sounds) means the preset's default.
   var release: Float?
+  /// Tape amount 0...1; nil (older saved sounds) means off.
+  var tape: Float?
 
   /// Slider -> envelope time constant, log curve centred on 0.09 s: the fixed release
   /// this replaced sits exactly at the middle (0.5). Range ~7 ms ... 1.16 s.
@@ -175,6 +177,7 @@ final class LoopEngine: ObservableObject {
   @Published var instrumentDrift: Float = 0.18
   @Published var instrumentRing: Float = 0
   @Published var instrumentRelease: Float = InstrumentPatch.defaultRelease(for: .keys)
+  @Published var instrumentTape: Float = 0
   @Published var instrumentWave: OscWave = .warm
   @Published var instrumentWave2: OscWave = .square
   @Published var oscMix: Float = 0.2
@@ -311,6 +314,7 @@ final class LoopEngine: ObservableObject {
   private let silentPlayer = AVAudioPlayerNode()
   private let captureState = CaptureState()
   private let liveSynth = LiveSynth()
+  private let tapeSim = TapeSim()
   private var synthNode: AVAudioSourceNode?
   /// One timeline for drums and loops.
   private let transportClock = TransportClock()
@@ -427,7 +431,7 @@ final class LoopEngine: ObservableObject {
 
     liveSynth.sampleRate = format.sampleRate
     liveLayers.setClock(start: 0, dur: loopDuration, sampleRate: format.sampleRate)
-    let node = AudioGraph.synthNode(format: format, synth: liveSynth, sampler: liveSampler, outRate: format.sampleRate)
+    let node = AudioGraph.synthNode(format: format, synth: liveSynth, sampler: liveSampler, tape: tapeSim, outRate: format.sampleRate)
     engine.attach(node)
     engine.connect(node, to: instMixer, format: format)
     synthNode = node
@@ -521,6 +525,11 @@ final class LoopEngine: ObservableObject {
   func setInstrumentReverb(_ v: Float) { instrumentReverb = v; rememberPatch(); applyInstrumentSpace() }
   func setInstrumentDrift(_ v: Float) { instrumentDrift = v; rememberPatch() }
   func setInstrumentRing(_ v: Float) { instrumentRing = v; rememberPatch() }
+  func setInstrumentTape(_ v: Float) {
+    instrumentTape = v
+    rememberPatch()
+    tapeSim.set(amount: v, sampleRate: format.sampleRate)
+  }
   func setInstrumentRelease(_ v: Float) {
     instrumentRelease = v
     rememberPatch()
@@ -608,6 +617,7 @@ final class LoopEngine: ObservableObject {
     }
     let patch = patches[p] ?? InstrumentPatch.default(for: p)
     instrumentRelease = patch.release ?? InstrumentPatch.defaultRelease(for: p)
+    instrumentTape = patch.tape ?? 0
     instrumentGain = patch.gain
     instrumentPan = patch.pan
     instrumentDelay = patch.delay
@@ -664,7 +674,8 @@ final class LoopEngine: ObservableObject {
       osc2Octave: osc2Octave,
       cutoff: cutoff,
       resonance: resonance,
-      release: instrumentRelease
+      release: instrumentRelease,
+      tape: instrumentTape
     )
   }
 
@@ -681,6 +692,7 @@ final class LoopEngine: ObservableObject {
     liveSynth.drift = instrumentDrift
     liveSynth.ring = instrumentRing
     liveSynth.release = InstrumentPatch.releaseTau(instrumentRelease)
+    tapeSim.set(amount: instrumentTape, sampleRate: format.sampleRate)
     liveSynth.glitch = instrumentGlitch
   }
   func setInputMode(_ mode: String) {
@@ -744,6 +756,7 @@ final class LoopEngine: ObservableObject {
       preset = p
     }
     instrumentRelease = patch.release ?? InstrumentPatch.defaultRelease(for: preset)
+    instrumentTape = patch.tape ?? 0
     instrumentGain = patch.gain
     instrumentPan = patch.pan
     instrumentDelay = patch.delay
