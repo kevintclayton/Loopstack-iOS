@@ -9,8 +9,6 @@
     <key>NSAllowsLocalNetworking</key>
     <true/>
   </dict>
-  <key>NSMicrophoneUsageDescription</key>
-  <string>Loopstack records the microphone into loop layers and into the sampler keyboard.</string>
   <key>UILaunchScreen</key>
   <dict>
     <key>UIColorName</key>

@@ -3,7 +3,6 @@ import UIKit
 
 struct StudioView: View {
   @StateObject private var engine = LoopEngine()
-  @State private var shareURL: URL?
 
   var body: some View {
     ZStack {
@@ -19,12 +18,6 @@ struct StudioView: View {
       }
     }
     .preferredColorScheme(.dark)
-    .sheet(item: Binding(
-      get: { shareURL.map { IdentifiedURL(url: $0) } },
-      set: { shareURL = $0?.url }
-    )) { item in
-      ShareSheet(url: item.url)
-    }
   }
 
   private var desk: some View {
@@ -36,7 +29,7 @@ struct StudioView: View {
         LayersView(engine: engine)
         DrumsView(engine: engine)
         MixView(engine: engine)
-        SessionView(engine: engine, share: { shareURL = $0 })
+        SessionView(engine: engine, share: { SharePresenter.present($0) })
         exportRow
         PrivacyView()
       }
@@ -60,7 +53,7 @@ struct StudioView: View {
 
   private var exportRow: some View {
     Button {
-      if let url = engine.exportStems() { shareURL = url }
+      if let url = engine.exportStems() { SharePresenter.present(url) }
     } label: {
       Text(engine.layers.isEmpty && !engine.drumsOn ? "Export loops as stems" : "Share stems")
         .font(.system(size: 12, weight: .medium))
@@ -1076,15 +1069,22 @@ private func roundBtn(system: String, size: CGFloat, filled: Bool = false, actio
   }
 }
 
-private struct IdentifiedURL: Identifiable {
-  var url: URL
-  var id: String { url.absoluteString }
-}
-
-private struct ShareSheet: UIViewControllerRepresentable {
-  var url: URL
-  func makeUIViewController(context: Context) -> UIActivityViewController {
-    UIActivityViewController(activityItems: [url], applicationActivities: nil)
+/// Presents the system share sheet from UIKit. On iPad it must be a popover with a
+/// source, so it opens centred with no arrow; on iPhone it's the usual sheet.
+private enum SharePresenter {
+  @MainActor static func present(_ url: URL) {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first,
+          let root = (scene.windows.first(where: \.isKeyWindow) ?? scene.windows.first)?.rootViewController
+    else { return }
+    var top = root
+    while let next = top.presentedViewController { top = next }
+    let sheet = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    if let pop = sheet.popoverPresentationController {
+      pop.sourceView = top.view
+      pop.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.midY, width: 1, height: 1)
+      pop.permittedArrowDirections = []
+    }
+    top.present(sheet, animated: true)
   }
-  func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

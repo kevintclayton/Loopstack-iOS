@@ -238,7 +238,7 @@
 				INFOPLIST_FILE = Loopstack/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Loopstack;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Loopstack records the microphone into your loop layers.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Loopstack uses the microphone to record audio into your loops and to capture samples for the sampler. Audio stays on your device unless you share it.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = NO;
 				INFOPLIST_KEY_UIRequiresFullScreen = YES;
 				INFOPLIST_KEY_UIStatusBarStyle = UIStatusBarStyleLightContent;
@@ -272,7 +272,7 @@
 				INFOPLIST_FILE = Loopstack/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Loopstack;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Loopstack records the microphone into your loop layers.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Loopstack uses the microphone to record audio into your loops and to capture samples for the sampler. Audio stays on your device unless you share it.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = NO;
 				INFOPLIST_KEY_UIRequiresFullScreen = YES;
 				INFOPLIST_KEY_UIStatusBarStyle = UIStatusBarStyleLightContent;

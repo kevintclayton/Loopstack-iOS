@@ -338,7 +338,144 @@ final class LoopEngine: ObservableObject {
     unlocked = true
     savedSounds = SoundLibrary.loadIndex()
     startClock()
+    observeAudioLifecycle()
     ensureRunning()
+  }
+
+  // MARK: Audio session and engine lifecycle
+
+  /// True once the user has turned on a mic feature. Until then the session is
+  /// playback-only: no permission prompt at launch, no mic indicator, and full-quality
+  /// Bluetooth (A2DP) output instead of call-quality hands-free audio.
+  private var micWanted = false
+  private var lifecycleObservers: [NSObjectProtocol] = []
+
+  private func configureSession(forMic mic: Bool) throws {
+    let session = AVAudioSession.sharedInstance()
+    if mic {
+      // A2DP keeps Bluetooth playback at full quality; input then uses the device mic.
+      try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP, .mixWithOthers])
+    } else {
+      try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+    }
+    try session.setPreferredIOBufferDuration(0.01)
+    try session.setActive(true)
+  }
+
+  /// Route the mic into the graph at its current hardware format (it can change with
+  /// the route), and re-open the sample-capture tap if a capture is running.
+  private func connectMicInput() {
+    let input = engine.inputNode
+    engine.disconnectNodeOutput(input)
+    if sampleTapInstalled {
+      input.removeTap(onBus: 0)
+      sampleTapInstalled = false
+    }
+    let f = input.outputFormat(forBus: 0)
+    guard f.sampleRate > 0, f.channelCount > 0 else {
+      micArmed = false
+      return
+    }
+    engine.connect(input, to: micMixer, format: f)
+    micArmed = true
+    if sampleRecording { installSampleTap(format: f) }
+  }
+
+  private func installSampleTap(format f: AVAudioFormat) {
+    guard !sampleTapInstalled else { return }
+    let sink = sampleCapture
+    engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: f) { buffer, _ in
+      sink.append(buffer)
+    }
+    sampleTapInstalled = true
+  }
+
+  /// The output's hardware format can change (headphones, Bluetooth, sample rate).
+  private func rewireOutput() {
+    engine.disconnectNodeOutput(masterOut)
+    let hw = engine.outputNode.outputFormat(forBus: 0)
+    engine.connect(masterOut, to: engine.outputNode, format: hw.sampleRate > 0 ? hw : format)
+  }
+
+  /// Rebuild what depends on the hardware and start again. Used after interruptions,
+  /// route/configuration changes, media-server resets and returning to the foreground.
+  private func restartEngine() {
+    guard graphReady else {
+      ensureRunning()
+      return
+    }
+    engine.stop()
+    do {
+      try configureSession(forMic: micWanted)
+      rewireOutput()
+      if micWanted { connectMicInput() }
+      engine.prepare()
+      try engine.start()
+      audioRunning = true
+      // Anything still playing (e.g. after plugging in headphones) goes back in line:
+      // loops are placed on the transport again and the metronome resyncs.
+      if running {
+        liveLayers.restartAll()
+        liveMetro.resync()
+      }
+    } catch {
+      audioRunning = false
+      micError = error.localizedDescription
+    }
+  }
+
+  private func observeAudioLifecycle() {
+    guard lifecycleObservers.isEmpty else { return }
+    let nc = NotificationCenter.default
+    let session = AVAudioSession.sharedInstance()
+    lifecycleObservers.append(nc.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] n in
+      let raw = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+      Task { @MainActor in
+        guard let self, let raw, let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        // A call, Siri or an alarm: pause (keeping the position) and be ready to play
+        // again afterwards; the user resumes with Play.
+        if type == .began {
+          if self.running { self.pause() }
+        } else {
+          self.restartEngine()
+        }
+      }
+    })
+    lifecycleObservers.append(nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: session, queue: .main) { [weak self] n in
+      let raw = n.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+      Task { @MainActor in
+        guard let self, let raw, let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
+        // Headphones unplugged: pause rather than suddenly play out of the speaker.
+        if reason == .oldDeviceUnavailable, self.running { self.pause() }
+      }
+    })
+    lifecycleObservers.append(nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+      Task { @MainActor in
+        guard let self, !self.engine.isRunning else { return }
+        self.restartEngine()
+      }
+    })
+    lifecycleObservers.append(nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: .main) { [weak self] _ in
+      Task { @MainActor in
+        guard let self else { return }
+        if self.running { self.pause() }
+        self.restartEngine()
+      }
+    })
+    // No background audio: pause on leaving so nothing drifts while suspended, and make
+    // sure the engine is running again on return.
+    lifecycleObservers.append(nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+      Task { @MainActor in
+        guard let self, self.running else { return }
+        self.pause()
+      }
+    })
+    lifecycleObservers.append(nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+      Task { @MainActor in
+        guard let self, self.unlocked, !self.engine.isRunning else { return }
+        self.restartEngine()
+      }
+    })
   }
 
   @discardableResult
@@ -349,12 +486,11 @@ final class LoopEngine: ObservableObject {
     }
     do {
       let session = AVAudioSession.sharedInstance()
-      try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP, .mixWithOthers])
-      try session.setPreferredIOBufferDuration(0.01)
-      try session.setActive(true)
+      try configureSession(forMic: micWanted)
       let sr = session.sampleRate >= 8000 ? session.sampleRate : 44100
       format = AVAudioFormat(standardFormatWithSampleRate: sr, channels: 2)!
       attachGraph()
+      if micWanted { connectMicInput() }
       engine.prepare()
       try engine.start()
       audioRunning = true
@@ -421,13 +557,8 @@ final class LoopEngine: ObservableObject {
     instReverb.wetDryMix = 0
     instReverb.loadFactoryPreset(.mediumHall)
 
-    let input = engine.inputNode
-    let inFormat = input.outputFormat(forBus: 0)
-    if inFormat.sampleRate > 0, inFormat.channelCount > 0 {
-      engine.connect(input, to: micMixer, format: inFormat)
-    }
+    // The mic joins the graph only when the user enables a mic feature (enableMic).
     micMixer.outputVolume = 0
-    // Keep micArmed false so monitor stays off until the user enables it.
 
     liveSynth.sampleRate = format.sampleRate
     liveLayers.setClock(start: 0, dur: loopDuration, sampleRate: format.sampleRate)
@@ -700,7 +831,7 @@ final class LoopEngine: ObservableObject {
     if mode == "sampler" {
       playSampler = true
       liveSynth.allOff()
-      if micState != .ready { enableMic() }
+      // The mic is asked for when a capture starts, not just for opening the sampler.
     } else {
       playSampler = false
       liveSampler.allOff()
@@ -806,28 +937,19 @@ final class LoopEngine: ObservableObject {
 
   private func beginSampleCapture() {
     ensureRunning()
-    if micState != .ready {
-      enableMic()
+    guard micState == .ready, micArmed else {
+      // Starts once the mic is allowed and connected.
+      enableMic { [weak self] in self?.beginSampleCapture() }
+      return
     }
-    let input = engine.inputNode
-    let inFormat = input.outputFormat(forBus: 0)
+    let inFormat = engine.inputNode.outputFormat(forBus: 0)
     guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
       saveError = "No input device. Plug in a mic or allow the iPhone microphone."
       return
     }
-    if !micArmed {
-      engine.connect(input, to: micMixer, format: inFormat)
-      micArmed = true
-    }
     let maxFrames = Int(inFormat.sampleRate * 6)
     sampleCapture.start(maxFrames: maxFrames)
-    if !sampleTapInstalled {
-      let sink = sampleCapture
-      input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { buffer, _ in
-        sink.append(buffer)
-      }
-      sampleTapInstalled = true
-    }
+    installSampleTap(format: inFormat)
     sampleRecording = true
     saveError = nil
     applyGains()
@@ -1072,41 +1194,36 @@ final class LoopEngine: ObservableObject {
     liveSynth.noteOff(midi: midi)
   }
 
-  func enableMic() {
+  /// Ask for the mic (in context, when a mic feature is used), then switch the session to
+  /// record mode cleanly: stop, reconfigure, connect the input, restart.
+  func enableMic(then done: (() -> Void)? = nil) {
     micState = .pending
     Task {
-      let session = AVAudioSession.sharedInstance()
-      do {
-        try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothHFP])
-        try session.setActive(true)
-        let granted: Bool
-        if #available(iOS 17.0, *) {
-          granted = await AVAudioApplication.requestRecordPermission()
-        } else {
-          granted = await withCheckedContinuation { cont in
-            session.requestRecordPermission { cont.resume(returning: $0) }
-          }
+      let granted: Bool
+      if #available(iOS 17.0, *) {
+        granted = await AVAudioApplication.requestRecordPermission()
+      } else {
+        granted = await withCheckedContinuation { cont in
+          AVAudioSession.sharedInstance().requestRecordPermission { cont.resume(returning: $0) }
         }
-        if !granted {
-          micState = .denied
-          return
-        }
-        if !micArmed {
-          let input = engine.inputNode
-          let inFormat = input.outputFormat(forBus: 0)
-          if inFormat.sampleRate > 0, inFormat.channelCount > 0 {
-            engine.connect(input, to: micMixer, format: inFormat)
-          }
-          micArmed = true
-        }
-        micState = .ready
-        applyGains()
-      } catch {
-        micState = .error
-        micError = error.localizedDescription
       }
+      guard granted else {
+        micState = .denied
+        return
+      }
+      micWanted = true
+      restartEngine()
+      guard micArmed else {
+        micState = .error
+        micError = micError ?? "No input device. Plug in a mic or allow the iPhone microphone."
+        return
+      }
+      micState = .ready
+      applyGains()
+      done?()
     }
   }
+
 
   func setLayerGain(_ id: String, _ gain: Float) {
     if let i = layers.firstIndex(where: { $0.id == id }) {

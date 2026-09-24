@@ -21,6 +21,7 @@ final class LiveMetro: @unchecked Sendable {
   private enum Command {
     case start(bpm: Double, beats: Int, looping: Bool, origin: TimeInterval)
     case stop
+    case resync
   }
 
   private let lock = NSLock()
@@ -69,6 +70,13 @@ final class LiveMetro: @unchecked Sendable {
     lock.unlock()
   }
 
+  /// After an engine restart: pick the grid up from the clock again.
+  func resync() {
+    lock.lock()
+    pending.append(.resync)
+    lock.unlock()
+  }
+
   /// Render thread.
   private func apply(_ c: Command) {
     switch c {
@@ -93,6 +101,8 @@ final class LiveMetro: @unchecked Sendable {
         playhead = nil
       }
       enabled = false
+    case .resync:
+      if drainUntil == nil { playhead = nil }
     }
   }
 
