@@ -1490,50 +1490,142 @@ final class LiveSynth: @unchecked Sendable {
     var releasing = false
   }
 
-  var sampleRate: Double = 44100
-  var preset: InstrumentPreset = .keys
-  var wave: OscWave = .warm
-  var wave2: OscWave = .square
-  var mix: Float = 0.28
-  var detune: Float = 0.3
-  var osc2Octave: Int = 0
-  var cutoff: Float = 0.72
-  var resonance: Float = 0.12
-  var a4: Double = 437
-  var drift: Float = 0.66
-  var ring: Float = 0
-  var glitch: Float = 0
-  private var voices: [Voice] = []
+  struct Params {
+    var sampleRate: Double = 44100
+    var preset: InstrumentPreset = .keys
+    var wave: OscWave = .warm
+    var wave2: OscWave = .square
+    var mix: Float = 0.28
+    var detune: Float = 0.3
+    var osc2Octave: Int = 0
+    var cutoff: Float = 0.72
+    var resonance: Float = 0.12
+    var a4: Double = 437
+    var drift: Float = 0.66
+    var ring: Float = 0
+    var glitch: Float = 0
+  }
+
+  /// Note changes are queued for the render thread instead of editing its voices
+  /// under a lock it would have to wait on.
+  private enum Event {
+    case on(midi: Int, vel: Float, steal: Bool, env: Double)
+    case off(midi: Int)
+    case allOff
+  }
+
   private let lock = NSLock()
+  private var shared = Params()
+  private var paramsGen: UInt64 = 0
+  private var pending: [Event] = []
+
+  // Render thread only.
+  private var rp = Params()
+  private var renderParamsGen: UInt64 = 0
+  private var inbox: [Event] = []
+  private var voices: [Voice] = []
   private var cutHz: Double = 8000
   private var lpZ: Double = 0
   private var lpZR: Double = 0
   private var dcBlockL: Double = 0
   private var dcBlockR: Double = 0
+  private var rng = RTRandom()
+
+  init() {
+    pending.reserveCapacity(256)
+    inbox.reserveCapacity(256)
+    voices.reserveCapacity(16)
+  }
+
+  var sampleRate: Double {
+    get { lock.lock(); defer { lock.unlock() }; return shared.sampleRate }
+    set { lock.lock(); shared.sampleRate = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var preset: InstrumentPreset {
+    get { lock.lock(); defer { lock.unlock() }; return shared.preset }
+    set { lock.lock(); shared.preset = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var wave: OscWave {
+    get { lock.lock(); defer { lock.unlock() }; return shared.wave }
+    set { lock.lock(); shared.wave = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var wave2: OscWave {
+    get { lock.lock(); defer { lock.unlock() }; return shared.wave2 }
+    set { lock.lock(); shared.wave2 = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var mix: Float {
+    get { lock.lock(); defer { lock.unlock() }; return shared.mix }
+    set { lock.lock(); shared.mix = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var detune: Float {
+    get { lock.lock(); defer { lock.unlock() }; return shared.detune }
+    set { lock.lock(); shared.detune = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var osc2Octave: Int {
+    get { lock.lock(); defer { lock.unlock() }; return shared.osc2Octave }
+    set { lock.lock(); shared.osc2Octave = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var cutoff: Float {
+    get { lock.lock(); defer { lock.unlock() }; return shared.cutoff }
+    set { lock.lock(); shared.cutoff = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var resonance: Float {
+    get { lock.lock(); defer { lock.unlock() }; return shared.resonance }
+    set { lock.lock(); shared.resonance = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var a4: Double {
+    get { lock.lock(); defer { lock.unlock() }; return shared.a4 }
+    set { lock.lock(); shared.a4 = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var drift: Float {
+    get { lock.lock(); defer { lock.unlock() }; return shared.drift }
+    set { lock.lock(); shared.drift = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var ring: Float {
+    get { lock.lock(); defer { lock.unlock() }; return shared.ring }
+    set { lock.lock(); shared.ring = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var glitch: Float {
+    get { lock.lock(); defer { lock.unlock() }; return shared.glitch }
+    set { lock.lock(); shared.glitch = newValue; paramsGen &+= 1; lock.unlock() }
+  }
 
   func noteOn(midi: Int, velocity: Float, steal: Bool = true) {
     lock.lock()
-    if steal {
-      voices.removeAll { $0.midi == midi }
-    }
-    if voices.count >= 8 { voices.removeFirst(voices.count - 7) }
-    let startEnv: Double = (preset == .pluck) ? 1 : 0.001
-    voices.append(Voice(midi: midi, vel: velocity, env: startEnv))
+    // Starting envelope uses the preset at press time, as before.
+    let startEnv: Double = (shared.preset == .pluck) ? 1 : 0.001
+    pending.append(.on(midi: midi, vel: velocity, steal: steal, env: startEnv))
     lock.unlock()
   }
 
   func noteOff(midi: Int) {
     lock.lock()
-    for i in voices.indices where voices[i].midi == midi {
-      voices[i].releasing = true
-    }
+    pending.append(.off(midi: midi))
     lock.unlock()
   }
 
   func allOff() {
     lock.lock()
-    for i in voices.indices { voices[i].releasing = true }
+    pending.append(.allOff)
     lock.unlock()
+  }
+
+  /// Render thread. Voices has reserved capacity, so none of this allocates.
+  private func apply(_ e: Event) {
+    switch e {
+    case let .on(midi, vel, steal, env):
+      if steal {
+        voices.removeAll { $0.midi == midi }
+      }
+      if voices.count >= 8 { voices.removeFirst(voices.count - 7) }
+      voices.append(Voice(midi: midi, vel: vel, env: env))
+    case let .off(midi):
+      for i in voices.indices where voices[i].midi == midi {
+        voices[i].releasing = true
+      }
+    case .allOff:
+      for i in voices.indices { voices[i].releasing = true }
+    }
   }
 
   func render(frames: Int, list: UnsafeMutablePointer<AudioBufferList>) {
@@ -1551,22 +1643,32 @@ final class LiveSynth: @unchecked Sendable {
       if right != left { right[i] = 0 }
     }
 
-    lock.lock()
-    let sr = max(sampleRate, 8000)
+    // Never wait: if the UI holds the lock, play on and pick up notes next cycle.
+    if lock.try() {
+      swap(&pending, &inbox)
+      if paramsGen != renderParamsGen {
+        rp = shared
+        renderParamsGen = paramsGen
+      }
+      lock.unlock()
+      for e in inbox { apply(e) }
+      inbox.removeAll(keepingCapacity: true)
+    }
+    let sr = max(rp.sampleRate, 8000)
     let dt = 1 / sr
-    let preset = self.preset
-    let wave = self.wave
-    let wave2 = self.wave2
-    let mix2 = Double(max(0, min(1, mix)))
-    let cents = Double(detune) * 24
-    let oct = osc2Octave
-    let a4 = self.a4
-    let driftAmt = Double(drift)
-    let ringAmt = Double(ring)
-    let glitchAmt = Double(glitch)
-    let cutTarget = 80 * pow(14000 / 80, Double(max(0.02, min(1, cutoff))))
+    let preset = rp.preset
+    let wave = rp.wave
+    let wave2 = rp.wave2
+    let mix2 = Double(max(0, min(1, rp.mix)))
+    let cents = Double(rp.detune) * 24
+    let oct = rp.osc2Octave
+    let a4 = rp.a4
+    let driftAmt = Double(rp.drift)
+    let ringAmt = Double(rp.ring)
+    let glitchAmt = Double(rp.glitch)
+    let cutTarget = 80 * pow(14000 / 80, Double(max(0.02, min(1, rp.cutoff))))
     cutHz += 0.04 * (cutTarget - cutHz)
-    let res = Double(max(0, min(1, resonance)))
+    let res = Double(max(0, min(1, rp.resonance)))
     let voiceScale = 0.22 / sqrt(Double(max(1, voices.count)))
     var i = 0
     while i < voices.count {
@@ -1586,8 +1688,8 @@ final class LiveSynth: @unchecked Sendable {
         let wander = 1 + driftAmt * 0.004 * sin(v.phase * 0.012)
         let inc1 = freq * wander / sr
         let inc2 = freq2 * wander / sr
-        var osc1 = Self.osc(wave, phase: v.phase, inc: inc1)
-        var osc2 = Self.osc(wave2, phase: v.phase2, inc: inc2)
+        var osc1 = Self.osc(wave, phase: v.phase, inc: inc1, rng: &rng)
+        var osc2 = Self.osc(wave2, phase: v.phase2, inc: inc2, rng: &rng)
         v.phase += inc1
         v.phase2 += inc2
         if v.phase >= 1 { v.phase -= floor(v.phase) }
@@ -1640,7 +1742,6 @@ final class LiveSynth: @unchecked Sendable {
     lpZR = zR
     dcBlockL = dcl
     dcBlockR = dcr
-    lock.unlock()
   }
 
   /// Bring presets to a similar seated level. Pluck is the reference.
@@ -1666,7 +1767,7 @@ final class LiveSynth: @unchecked Sendable {
   }
 
   /// Band-limited analog-style osc. Phase is 0..<1.
-  private static func osc(_ wave: OscWave, phase: Double, inc: Double) -> Double {
+  private static func osc(_ wave: OscWave, phase: Double, inc: Double, rng: inout RTRandom) -> Double {
     let t = phase - floor(phase)
     switch wave {
     case .sine:
@@ -1683,7 +1784,7 @@ final class LiveSynth: @unchecked Sendable {
       let s = t < pw ? 1.0 : -1.0
       return 0.7 * (s - polyblep(t, inc) + polyblep(fmod(t + (1 - pw), 1), inc))
     case .noise:
-      return Double.random(in: -0.7...0.7)
+      return rng.unit() * 1.4 - 0.7
     case .warm:
       let tri = 1 - abs(4 * t - 2)
       let sq = t < 0.5 ? 0.28 : -0.28
