@@ -1648,7 +1648,8 @@ final class LiveSynth: @unchecked Sendable {
     switch preset {
     case .keys: return 2.0    // +6 dB
     case .pluck: return 2.8   // +9 dB
-    case .bass, .pad, .noise: return 1.0
+    case .noise: return 2.0   // +6 dB
+    case .bass, .pad: return 1.0
     }
   }
 
