@@ -500,6 +500,7 @@ struct InstrumentView: View {
           engine.setInstrumentTune(428 + Double(v) * 24)
         }
         FxRow(label: "Ring", value: engine.instrumentRing, display: "\(Int(engine.instrumentRing * 100))", onChange: engine.setInstrumentRing)
+        FxRow(label: "Rel", value: engine.instrumentRelease, display: releaseLabel(engine.instrumentRelease), onChange: engine.setInstrumentRelease)
       }
     }
   }
@@ -935,6 +936,11 @@ struct PeakView: View {
     }
     .frame(height: 48)
   }
+}
+
+private func releaseLabel(_ v: Float) -> String {
+  let sec = InstrumentPatch.releaseSeconds(v)
+  return sec < 1 ? "\(Int((sec * 1000).rounded()))ms" : String(format: "%.1fs", sec)
 }
 
 private struct FxStrip: View {

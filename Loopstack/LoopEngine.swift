@@ -39,6 +39,25 @@ struct InstrumentPatch: Codable, Equatable {
   var osc2Octave: Int = 0
   var cutoff: Float = 0.72
   var resonance: Float = 0.12
+  /// Release slider 0...1; nil (older saved sounds) means the preset's default.
+  var release: Float?
+
+  /// Slider -> envelope time constant, log curve centred on 0.09 s: the fixed release
+  /// this replaced sits exactly at the middle (0.5). Range ~7 ms ... 1.16 s.
+  static func releaseTau(_ v: Float) -> Double {
+    0.09 * pow(12.87, 2 * Double(min(1, max(0, v))) - 1)
+  }
+
+  /// What the slider shows: time for a released note to fade out (-60 dB),
+  /// about 0.05 s ... 8 s; 0.62 s at the middle.
+  static func releaseSeconds(_ v: Float) -> Double {
+    releaseTau(v) * 6.9078
+  }
+
+  /// Pluck ignored key-up and rang out its own decay; at the maximum it still does.
+  static func defaultRelease(for preset: InstrumentPreset) -> Float {
+    preset == .pluck ? 1 : 0.5
+  }
 
   static func `default`(for preset: InstrumentPreset) -> InstrumentPatch {
     var patch = InstrumentPatch(wave: preset.defaultWave)
@@ -57,12 +76,15 @@ struct InstrumentPatch: Codable, Equatable {
       patch.reverb = 0.32
       patch.drift = 0.18
     case .bass:
-      patch.wave = .sine
+      // Saw filtered close to the note (cut 0.10 is ~135 Hz): round like a triangle
+      // bass, but with a little upper content so it doesn't vanish on phone speakers
+      // the way a pure sine did. A higher cutoff (0.5) read as a lead.
+      patch.wave = .saw
       patch.wave2 = .sine
       patch.oscMix = 0.32
       patch.oscDetune = 0.06
       patch.osc2Octave = -1
-      patch.cutoff = 0.42
+      patch.cutoff = 0.10
       patch.resonance = 0.24
       patch.gain = 0.86
       patch.delay = 0.04
@@ -149,6 +171,7 @@ final class LoopEngine: ObservableObject {
   @Published var instrumentReverb: Float = 0.32
   @Published var instrumentDrift: Float = 0.18
   @Published var instrumentRing: Float = 0
+  @Published var instrumentRelease: Float = InstrumentPatch.defaultRelease(for: .keys)
   @Published var instrumentWave: OscWave = .warm
   @Published var instrumentWave2: OscWave = .square
   @Published var oscMix: Float = 0.2
@@ -447,6 +470,11 @@ final class LoopEngine: ObservableObject {
   func setInstrumentReverb(_ v: Float) { instrumentReverb = v; rememberPatch(); applyInstrumentSpace() }
   func setInstrumentDrift(_ v: Float) { instrumentDrift = v; rememberPatch() }
   func setInstrumentRing(_ v: Float) { instrumentRing = v; rememberPatch() }
+  func setInstrumentRelease(_ v: Float) {
+    instrumentRelease = v
+    rememberPatch()
+    liveSynth.release = InstrumentPatch.releaseTau(v)
+  }
   func setInstrumentGlitch(_ v: Float) { instrumentGlitch = v; rememberPatch() }
   func setInstrumentTune(_ hz: Double) { instrumentTune = min(452, max(428, hz)); rememberPatch() }
   func setInstrumentOctave(_ n: Int) { instrumentOctave = min(3, max(-3, n)); rememberPatch() }
@@ -521,6 +549,7 @@ final class LoopEngine: ObservableObject {
       inputMode = "keys"
     }
     let patch = patches[p] ?? InstrumentPatch.default(for: p)
+    instrumentRelease = patch.release ?? InstrumentPatch.defaultRelease(for: p)
     instrumentGain = patch.gain
     instrumentPan = patch.pan
     instrumentDelay = patch.delay
@@ -576,7 +605,8 @@ final class LoopEngine: ObservableObject {
       oscDetune: oscDetune,
       osc2Octave: osc2Octave,
       cutoff: cutoff,
-      resonance: resonance
+      resonance: resonance,
+      release: instrumentRelease
     )
   }
 
@@ -592,6 +622,7 @@ final class LoopEngine: ObservableObject {
     liveSynth.a4 = instrumentTune
     liveSynth.drift = instrumentDrift
     liveSynth.ring = instrumentRing
+    liveSynth.release = InstrumentPatch.releaseTau(instrumentRelease)
     liveSynth.glitch = instrumentGlitch
   }
   func setInputMode(_ mode: String) {
@@ -654,6 +685,7 @@ final class LoopEngine: ObservableObject {
     if let p = InstrumentPreset(rawValue: sound.preset), !sound.isSampler {
       preset = p
     }
+    instrumentRelease = patch.release ?? InstrumentPatch.defaultRelease(for: preset)
     instrumentGain = patch.gain
     instrumentPan = patch.pan
     instrumentDelay = patch.delay
@@ -1545,6 +1577,7 @@ final class LiveSynth: @unchecked Sendable {
     var drift: Float = 0.66
     var ring: Float = 0
     var glitch: Float = 0
+    var release: Double = 0.09
   }
 
   /// Note changes are queued for the render thread instead of editing its voices
@@ -1629,6 +1662,11 @@ final class LiveSynth: @unchecked Sendable {
   var glitch: Float {
     get { lock.lock(); defer { lock.unlock() }; return shared.glitch }
     set { lock.lock(); shared.glitch = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  /// Release envelope time constant in seconds (fade to -60 dB takes ~6.9x this).
+  var release: Double {
+    get { lock.lock(); defer { lock.unlock() }; return shared.release }
+    set { lock.lock(); shared.release = newValue; paramsGen &+= 1; lock.unlock() }
   }
 
   func noteOn(midi: Int, velocity: Float, steal: Bool = true) {
@@ -1717,12 +1755,16 @@ final class LiveSynth: @unchecked Sendable {
       let freq = min(sr * 0.45, a4 * pow(2.0, (Double(v.midi) - 69) / 12))
       let freq2 = min(sr * 0.45, freq * pow(2.0, Double(oct)) * pow(2.0, cents / 1200))
       let attack = preset == .pad ? 0.14 : 0.005
-      let release = preset == .pluck ? 0.22 : 0.09
+      let release = max(0.005, rp.release)
+      let releaseCoef = exp(-1 / (release * sr))
+      // Pluck decays on its own; a release below the slider's maximum also shortens it on key-up.
+      let pluckChoke = release < 1.15
       for f in 0..<frames {
         if preset == .pluck {
           v.env *= exp(-4.8 / sr)
+          if v.releasing && pluckChoke { v.env *= releaseCoef }
         } else if v.releasing {
-          v.env *= exp(-1 / (release * sr))
+          v.env *= releaseCoef
         } else if v.env < 1 {
           v.env = min(1, v.env + dt / attack)
         }
@@ -1803,7 +1845,8 @@ final class LiveSynth: @unchecked Sendable {
     case .keys: return 2.0    // +6 dB
     case .pluck: return 2.8   // +9 dB
     case .noise: return 2.0   // +6 dB
-    case .bass, .pad: return 1.0
+    case .bass: return 1.6    // +4 dB: the filtered saw sits ~4 dB under the old sine bass
+    case .pad: return 1.0
     }
   }
 
