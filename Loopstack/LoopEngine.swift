@@ -1207,7 +1207,8 @@ final class LoopEngine: ObservableObject {
     if drumsOn {
       let pattern = DrumLibrary.find(drumId)
       let buf = AudioDSP.renderPattern(pattern, bpm: Double(bpm), loopBars: bars, format: format, acoustic: acousticKit)
-      AudioDSP.colorDrums(buf, drive: drumDrive, dirt: drumDirt, vinyl: drumVinyl)
+      AudioDSP.colorDrums(buf, drive: drumDrive, dirt: drumDirt, vinyl: drumVinyl,
+                          crackle: vinylTrack(for: pattern, frames: Int(buf.frameLength), bpm: Double(bpm), sampleRate: format.sampleRate))
       files.append(("Drums - \(pattern.name).wav", AudioDSP.encodeWav(buf)))
     }
     for layer in layers {
@@ -1462,17 +1463,26 @@ final class LoopEngine: ObservableObject {
     }
     // The plain groove plays straight away; in jam mode the first phrase replaces
     // it seamlessly once rendered (same grid, same bar).
+    let pattern = DrumLibrary.find(drumId)
     let buf = AudioDSP.renderPattern(
-      DrumLibrary.find(drumId),
+      pattern,
       bpm: Double(bpm),
       loopBars: bars,
       format: format,
       acoustic: acousticKit
     )
-    liveDrums.setDry(buf, loopDur: loopDuration)
+    let crackle = vinylTrack(for: pattern, frames: Int(buf.frameLength), bpm: Double(bpm), sampleRate: format.sampleRate)
+    liveDrums.setDry(buf, loopDur: loopDuration, crackle: crackle)
     liveDrums.enabled = true
     jamReset()
     if jamMode { jamTick(now: CACurrentMediaTime()) }
+  }
+
+  /// Record surface for a groove: one pattern length, repeated, so it sits in the
+  /// break like crackle in a sampled loop. Same groove, same "record".
+  nonisolated private func vinylTrack(for pattern: DrumPattern, frames: Int, bpm: Double, sampleRate: Double) -> [Float] {
+    let period = Int((Double(max(1, pattern.bars) * 4) * 60 / bpm * sampleRate).rounded())
+    return AudioDSP.vinylTrack(frames: frames, period: period, sampleRate: sampleRate, seed: AudioDSP.vinylSeed(pattern.id))
   }
 
   // MARK: Jam
@@ -1555,24 +1565,26 @@ final class LoopEngine: ObservableObject {
       let gain = AudioDSP.grooveGain(groove, bpm: bpm, format: format, acoustic: acoustic)
       let phrase = Jam.phrase(groove: groove, fill: fill, seed: seed)
       let buf = AudioDSP.renderPattern(phrase, bpm: bpm, loopBars: Jam.phraseBars, format: format, acoustic: acoustic, fixedGain: gain)
+      let period = Int((Double(max(1, groove.bars) * 4) * 60 / bpm * format.sampleRate).rounded())
+      let crackle = AudioDSP.vinylTrack(frames: Int(buf.frameLength), period: period, sampleRate: format.sampleRate, seed: AudioDSP.vinylSeed(groove.id))
       DispatchQueue.main.async {
-        self.jamRendered(phrase: k, buf: buf, token: token, phraseDur: P)
+        self.jamRendered(phrase: k, buf: buf, crackle: crackle, token: token, phraseDur: P)
       }
     }
   }
 
-  private func jamRendered(phrase k: Int, buf: AVAudioPCMBuffer, token: Int, phraseDur P: Double) {
+  private func jamRendered(phrase k: Int, buf: AVAudioPCMBuffer, crackle: [Float], token: Int, phraseDur P: Double) {
     guard token == jam.token, jamMode, drumsOn, running else { return }
     jam.rendering.remove(k)
     let now = CACurrentMediaTime()
     let kNow = max(0, Int(floor((now - cycleStart) / P)))
     if k > kNow {
       // Ahead of time: switch exactly on its first bar line.
-      liveDrums.queueNext(buf, at: cycleStart + Double(k) * P, loopDur: P)
+      liveDrums.queueNext(buf, at: cycleStart + Double(k) * P, loopDur: P, crackle: crackle)
       jam.queued = k
     } else if k == kNow {
       // Needed now (jam start, or a render that ran late): the grid lines up either way.
-      liveDrums.setDry(buf, loopDur: P)
+      liveDrums.setDry(buf, loopDur: P, crackle: crackle)
       jam.loaded = k
       if jam.queued == k { jam.queued = nil }
       showJamGroove(phrase: k)
@@ -2092,6 +2104,8 @@ final class LiveDrums: @unchecked Sendable {
     var vinyl: Float = 0
     var left: [Float] = []
     var right: [Float] = []
+    /// Record surface for this buffer, read at the same position as the drums.
+    var crackle: [Float] = []
     var fillL: [Float] = []
     var fillR: [Float] = []
     var fillDur: Double = 0
@@ -2101,6 +2115,7 @@ final class LiveDrums: @unchecked Sendable {
     /// queues each phrase this way; the main thread promotes it once it's playing.
     var nextL: [Float] = []
     var nextR: [Float] = []
+    var nextCrackle: [Float] = []
     var nextDur: Double = 1
     var nextAt: TimeInterval = .infinity
     var gen: UInt64 = 0
@@ -2117,10 +2132,7 @@ final class LiveDrums: @unchecked Sendable {
 
   // Render-thread state.
   private var r = Shared()
-  private var crackle = 0
-  private var prev: Float = 0
-  private var lp: Float = 0
-  private var rng = RTRandom()
+  private var color = DrumColor()
 
   var enabled: Bool {
     get { read { $0.enabled } }
@@ -2173,32 +2185,35 @@ final class LiveDrums: @unchecked Sendable {
 
   /// Replaces the playing buffer now (and its loop length, together, so the
   /// renderer never pairs a buffer with the wrong length). Drops any queued next.
-  func setDry(_ buf: AVAudioPCMBuffer, loopDur: Double? = nil) {
+  func setDry(_ buf: AVAudioPCMBuffer, loopDur: Double? = nil, crackle: [Float] = []) {
     let frames = Int(buf.frameLength)
     guard frames > 0, let ch = buf.floatChannelData else { return }
     let L = Array(UnsafeBufferPointer(start: ch[0], count: frames))
     let R = buf.format.channelCount > 1 ? Array(UnsafeBufferPointer(start: ch[1], count: frames)) : L
     write { s in
-      retired.retire([s.left, s.right, s.nextL, s.nextR], gen: s.gen &+ 1)
+      retired.retire([s.left, s.right, s.crackle, s.nextL, s.nextR, s.nextCrackle], gen: s.gen &+ 1)
       s.left = L
       s.right = R
+      s.crackle = crackle
       if let loopDur { s.loopDur = loopDur }
       s.nextL = []
       s.nextR = []
+      s.nextCrackle = []
       s.nextAt = .infinity
     }
   }
 
   /// Queues a buffer to take over at wall time `at`, to the sample.
-  func queueNext(_ buf: AVAudioPCMBuffer, at: TimeInterval, loopDur: Double) {
+  func queueNext(_ buf: AVAudioPCMBuffer, at: TimeInterval, loopDur: Double, crackle: [Float] = []) {
     let frames = Int(buf.frameLength)
     guard frames > 0, let ch = buf.floatChannelData else { return }
     let L = Array(UnsafeBufferPointer(start: ch[0], count: frames))
     let R = buf.format.channelCount > 1 ? Array(UnsafeBufferPointer(start: ch[1], count: frames)) : L
     write { s in
-      retired.retire([s.nextL, s.nextR], gen: s.gen &+ 1)
+      retired.retire([s.nextL, s.nextR, s.nextCrackle], gen: s.gen &+ 1)
       s.nextL = L
       s.nextR = R
+      s.nextCrackle = crackle
       s.nextDur = max(loopDur, 0.05)
       s.nextAt = at
     }
@@ -2208,12 +2223,14 @@ final class LiveDrums: @unchecked Sendable {
   func promoteNext() {
     write { s in
       guard s.nextAt.isFinite, s.nextL.count > 1 else { return }
-      retired.retire([s.left, s.right], gen: s.gen &+ 1)
+      retired.retire([s.left, s.right, s.crackle], gen: s.gen &+ 1)
       s.left = s.nextL
       s.right = s.nextR
+      s.crackle = s.nextCrackle
       s.loopDur = s.nextDur
       s.nextL = []
       s.nextR = []
+      s.nextCrackle = []
       s.nextAt = .infinity
     }
   }
@@ -2270,25 +2287,26 @@ final class LiveDrums: @unchecked Sendable {
     }
     let fillFrom = r.fillAt - now.cycleStart
     if split > 0 {
-      renderSpan(0..<split, t0: t0, sr: sr, L: r.left, R: r.right, dur: max(r.loopDur, 0.05), fillFrom: fillFrom, outL: outL, outR: outR)
+      renderSpan(0..<split, t0: t0, sr: sr, L: r.left, R: r.right, C: r.crackle, dur: max(r.loopDur, 0.05), fillFrom: fillFrom, outL: outL, outR: outR)
     }
     if split < frames {
-      renderSpan(split..<frames, t0: t0, sr: sr, L: r.nextL, R: r.nextR, dur: r.nextDur, fillFrom: fillFrom, outL: outL, outR: outR)
+      renderSpan(split..<frames, t0: t0, sr: sr, L: r.nextL, R: r.nextR, C: r.nextCrackle, dur: r.nextDur, fillFrom: fillFrom, outL: outL, outR: outR)
     }
   }
 
   /// Render thread. Arrays are passed in so the per-sample loop doesn't retain them.
   private func renderSpan(
-    _ span: Range<Int>, t0: Double, sr: Double, L: [Float], R: [Float], dur: Double,
+    _ span: Range<Int>, t0: Double, sr: Double, L: [Float], R: [Float], C: [Float], dur: Double,
     fillFrom: Double, outL: UnsafeMutablePointer<Float>, outR: UnsafeMutablePointer<Float>
   ) {
     let n = L.count
+    let hasCrackle = C.count == n
     let drive = r.drive
     let dirt = r.dirt
-    let vinyl = Double(r.vinyl)
+    let vinyl = r.vinyl
     let fillN = r.fillL.count
     let fillOK = fillN > 1 && r.fillR.count == fillN
-    let driveAmt = 1 + drive * 4.5
+    let perSec = Double(n) / dur
     for i in span {
       let t = t0 + Double(i) / sr
       // Before the transport start (the short lead-in) stay silent rather than
@@ -2298,65 +2316,35 @@ final class LiveDrums: @unchecked Sendable {
         if outR != outL { outR[i] = 0 }
         continue
       }
+      // Loop position, with the record's wobble. Drums and surface noise share it,
+      // so the crackle moves with the drums like it's part of the sample.
+      var pos = t.truncatingRemainder(dividingBy: dur)
+      if pos < 0 { pos += dur }
+      var idx = pos * perSec + DrumColor.wobble(t: t, vinyl: vinyl) * perSec
+      while idx < 0 { idx += Double(n) }
+      idx = idx.truncatingRemainder(dividingBy: Double(n))
+      let i0 = Int(idx)
+      let i1 = (i0 + 1) % n
+      let frac = Float(idx - floor(idx))
       var x: Float = 0
       var y: Float = 0
       let ft = t - fillFrom
       if fillOK, ft >= 0, ft < r.fillDur {
         var fidx = ft / r.fillDur * Double(fillN)
         if fidx >= Double(fillN) { fidx = Double(fillN - 1) }
-        let i0 = min(fillN - 1, Int(fidx))
-        let i1 = min(fillN - 1, i0 + 1)
-        let frac = Float(fidx - floor(fidx))
-        x = r.fillL[i0] * (1 - frac) + r.fillL[i1] * frac
-        y = r.fillR[i0] * (1 - frac) + r.fillR[i1] * frac
+        let f0 = min(fillN - 1, Int(fidx))
+        let f1 = min(fillN - 1, f0 + 1)
+        let ff = Float(fidx - floor(fidx))
+        x = r.fillL[f0] * (1 - ff) + r.fillL[f1] * ff
+        y = r.fillR[f0] * (1 - ff) + r.fillR[f1] * ff
       } else {
-        var pos = t.truncatingRemainder(dividingBy: dur)
-        if pos < 0 { pos += dur }
-        var idx = pos / dur * Double(n)
-        if vinyl > 0.001 {
-          idx += sin(2 * Double.pi * 0.32 * t) * vinyl * 0.0022 * Double(n)
-          idx += sin(2 * Double.pi * 13 * t) * vinyl * 0.00028 * Double(n)
-        }
-        while idx < 0 { idx += Double(n) }
-        idx = idx.truncatingRemainder(dividingBy: Double(n))
-        let i0 = Int(idx)
-        let i1 = (i0 + 1) % n
-        let frac = Float(idx - floor(idx))
         x = L[i0] * (1 - frac) + L[i1] * frac
         y = R[i0] * (1 - frac) + R[i1] * frac
       }
-      if drive > 0.01 {
-        let g = driveAmt
-        x = tanhf(x * g) / tanhf(g)
-        y = tanhf(y * g) / tanhf(g)
-      }
-      if dirt > 0.01 {
-        let hp = x - prev
-        prev = x
-        x += hp * dirt * 0.22
-        y += hp * dirt * 0.18
-        x += tanhf(x * x * x * (2 + dirt * 4)) * dirt * 0.18
-      }
-      if vinyl > 0.01 {
-        let rumble = Float(sin(2 * Double.pi * 31 * t) * vinyl * 0.035)
-        x += rumble
-        y += rumble * 0.9
-        if crackle > 0 {
-          let c = Float(crackle) * 0.01 * Float(rng.unit() * 2 - 1)
-          x += c; y += c
-          crackle -= 1
-        } else if rng.unit() < vinyl * 0.0024 {
-          crackle = 2 + Int(rng.unit() * 17)
-          let pop = Float(0.12 + rng.unit() * 0.23) * (rng.unit() < 0.5 ? 1 : -1)
-          x += pop; y += pop
-        }
-        lp += 0.12 * (x - lp)
-        let dull = Float(vinyl)
-        x = x * (1 - dull * 0.45) + lp * dull * 0.45
-        y = y * (1 - dull * 0.45) + lp * dull * 0.45
-      }
-      outL[i] = max(-1, min(1, x))
-      if outR != outL { outR[i] = max(-1, min(1, y)) }
+      let c: Float = hasCrackle ? C[i0] * (1 - frac) + C[i1] * frac : 0
+      color.process(&x, &y, crackle: c, drive: drive, dirt: dirt, vinyl: vinyl)
+      outL[i] = x
+      if outR != outL { outR[i] = y }
     }
   }
 }

@@ -314,56 +314,81 @@ enum AudioDSP {
   }
 
   /// Drive, dirt, and vinyl (wow/flutter, rumble, crackle) — not a noise pad.
-  static func colorDrums(_ buf: AVAudioPCMBuffer, drive: Float, dirt: Float, vinyl: Float) {
+  /// Offline drum colouring for export: the same chain and crackle as live playback.
+  static func colorDrums(_ buf: AVAudioPCMBuffer, drive: Float, dirt: Float, vinyl: Float, crackle: [Float]) {
     let n = Int(buf.frameLength)
     guard n > 16, let data = buf.floatChannelData else { return }
     let sr = buf.format.sampleRate
-    let chs = Int(buf.format.channelCount)
-    let driveAmt = 1 + drive * 4.5
-    let vinylAmt = Double(max(0, min(1, vinyl)))
-    for c in 0..<chs {
-      let ch = data[c]
-      var src = [Float](repeating: 0, count: n)
-      for i in 0..<n { src[i] = ch[i] }
-      var lp: Float = 0
-      var prev: Float = 0
-      var crackle = 0
-      for i in 0..<n {
-        let t = Double(i) / sr
-        var idx = Double(i)
-        if vinylAmt > 0.001 {
-          idx += sin(2 * Double.pi * 0.32 * t) * vinylAmt * 0.0022 * sr
-          idx += sin(2 * Double.pi * 13.0 * t) * vinylAmt * 0.00028 * sr
-        }
-        let i0 = max(0, min(n - 2, Int(floor(idx))))
-        let frac = Float(idx - floor(idx))
-        var x = src[i0] * (1 - frac) + src[i0 + 1] * frac
-        if drive > 0.01 {
-          let g = driveAmt
-          x = tanhf(x * g) / tanhf(g)
-        }
-        if dirt > 0.01 {
-          let hp = x - prev
-          prev = x
-          x += hp * dirt * 0.22
-          x += tanhf(x * x * x * (2 + dirt * 4)) * dirt * 0.18
-        }
-        if vinylAmt > 0.01 {
-          x += Float(sin(2 * Double.pi * 31 * t) * vinylAmt * 0.035)
-          if crackle > 0 {
-            x += Float(crackle) * 0.012 * (Float.random(in: -1...1))
-            crackle -= 1
-          } else if Double.random(in: 0..<1) < vinylAmt * 0.0024 {
-            crackle = Int.random(in: 2...18)
-            x += Float.random(in: 0.12...0.35) * (Bool.random() ? 1 : -1)
-          }
-          lp += 0.12 * (x - lp)
-          x = x * Float(1 - vinylAmt * 0.45) + lp * Float(vinylAmt * 0.45)
-        }
-        ch[i] = max(-1, min(1, x))
-      }
+    let L = data[0]
+    let R = buf.format.channelCount > 1 ? data[1] : data[0]
+    let srcL = Array(UnsafeBufferPointer(start: L, count: n))
+    let srcR = Array(UnsafeBufferPointer(start: R, count: n))
+    var chain = DrumColor()
+    for i in 0..<n {
+      let t = Double(i) / sr
+      var idx = Double(i) + DrumColor.wobble(t: t, vinyl: vinyl) * sr
+      idx = min(Double(n - 2), max(0, idx))
+      let i0 = Int(idx), frac = Float(idx - floor(idx))
+      var x = srcL[i0] * (1 - frac) + srcL[i0 + 1] * frac
+      var y = srcR[i0] * (1 - frac) + srcR[i0 + 1] * frac
+      let c = crackle.count == n ? crackle[i0] * (1 - frac) + crackle[i0 + 1] * frac : 0
+      chain.process(&x, &y, crackle: c, drive: drive, dirt: dirt, vinyl: vinyl)
+      L[i] = x
+      if R != L { R[i] = y }
     }
   }
+
+  /// One pattern-length of record surface: soft band-limited ticks, the odd low pop,
+  /// and a hiss bed, tiled across `frames` so it repeats with the break the way
+  /// crackle does in a sampled loop. Unit level; the Vinyl slider scales it.
+  static func vinylTrack(frames: Int, period: Int, sampleRate sr: Double, seed: UInt64) -> [Float] {
+    let p = max(64, min(frames, period))
+    var rng = DrumRng(seed: seed)
+    var one = [Float](repeating: 0, count: p)
+    // Hiss: white noise band-passed to ~1-7 kHz, like surface noise through a cartridge.
+    let hpA = Float(exp(-2 * Double.pi * 1000 / sr)), lpA = Float(1 - exp(-2 * Double.pi * 7000 / sr))
+    var hpPrevIn: Float = 0, hpOut: Float = 0, lp: Float = 0
+    for i in 0..<p {
+      let w = Float(rng.bipolar())
+      hpOut = hpA * (hpOut + w - hpPrevIn)
+      hpPrevIn = w
+      lp += lpA * (hpOut - lp)
+      one[i] = lp * 0.035
+    }
+    // Ticks: mostly tiny, a few louder (heavy-tailed), short band-limited bursts.
+    func burst(at start: Int, amp: Float, freq: Double, decay: Double, length: Int) {
+      let phase = rng.unit() * 2 * Double.pi
+      for k in 0..<length where start + k < p {
+        let e = exp(-Double(k) / (decay * sr))
+        one[start + k] += amp * Float(e * sin(2 * Double.pi * freq * Double(k) / sr + phase))
+      }
+    }
+    let seconds = Double(p) / sr
+    let ticks = Int(seconds * 14)
+    for _ in 0..<ticks {
+      let at = Int(rng.unit() * Double(p - 128))
+      let amp = Float(0.05 + 0.55 * pow(rng.unit(), 4)) * (rng.unit() < 0.5 ? 1 : -1)
+      burst(at: at, amp: amp, freq: 1800 + rng.unit() * 3400, decay: 0.00025 + rng.unit() * 0.0003, length: 96)
+    }
+    // The odd low pop: a scratch or dust thump.
+    let pops = max(0, Int((seconds * 0.5).rounded(.down)) + (rng.unit() < seconds * 0.5 - floor(seconds * 0.5) ? 1 : 0))
+    for _ in 0..<pops {
+      let at = Int(rng.unit() * Double(max(1, p - 400)))
+      burst(at: at, amp: Float(0.6 + rng.unit() * 0.4) * (rng.unit() < 0.5 ? 1 : -1),
+            freq: 300 + rng.unit() * 600, decay: 0.0012 + rng.unit() * 0.0015, length: 360)
+    }
+    var out = [Float](repeating: 0, count: frames)
+    for i in 0..<frames { out[i] = one[i % p] }
+    return out
+  }
+
+  /// Seed so a groove always sits on the same "record".
+  static func vinylSeed(_ id: String) -> UInt64 {
+    var h: UInt64 = 0x84222325CBF29CE4
+    for b in id.utf8 { h ^= UInt64(b); h = h &* 0x100000001b3 }
+    return h
+  }
+
 
   static func renderVoice(_ voice: DrumVoice, _ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float) {
     switch voice {
@@ -821,5 +846,56 @@ enum AudioDSP {
     }
     mutating func unit() -> Double { Double(next() >> 11) * 0x1.0p-53 }
     mutating func bipolar() -> Double { unit() * 2 - 1 }
+  }
+}
+
+
+/// Drum colouring shared by live playback and export, so both sound the same.
+/// Order follows a real sampled break: the record (drums + surface noise together),
+/// then the sampler (dulling, narrower image), then Drive and Dirt on the whole thing.
+struct DrumColor {
+  private var lpL: Float = 0
+  private var lpR: Float = 0
+  private var prev: Float = 0
+
+  /// Record-speed wobble in seconds of displacement: wow ~0.32 Hz up to ±0.3% pitch,
+  /// flutter 13 Hz up to ±0.1%, at full Vinyl. (Was scaled by loop length before.)
+  static func wobble(t: Double, vinyl: Float) -> Double {
+    let v = Double(max(0, min(1, vinyl)))
+    guard v > 0.001 else { return 0 }
+    return v * (sin(2 * Double.pi * 0.32 * t) * 0.0015 + sin(2 * Double.pi * 13 * t) * 0.000012)
+  }
+
+  mutating func process(_ x: inout Float, _ y: inout Float, crackle c: Float, drive: Float, dirt: Float, vinyl: Float) {
+    let v = max(0, min(1, vinyl))
+    if v > 0.001 {
+      // Surface noise sits under the drums, in the same "sample".
+      let s = c * v * 0.1
+      x += s
+      y += s
+      // Records being sampled are close to mono.
+      let mid = (x + y) * 0.5, side = (x - y) * 0.5 * (1 - v * 0.5)
+      x = mid + side
+      y = mid - side
+      // Dulled top end, as before.
+      lpL += 0.12 * (x - lpL)
+      lpR += 0.12 * (y - lpR)
+      x = x * (1 - v * 0.45) + lpL * v * 0.45
+      y = y * (1 - v * 0.45) + lpR * v * 0.45
+    }
+    if drive > 0.01 {
+      let g = 1 + drive * 4.5
+      x = tanhf(x * g) / tanhf(g)
+      y = tanhf(y * g) / tanhf(g)
+    }
+    if dirt > 0.01 {
+      let hp = x - prev
+      prev = x
+      x += hp * dirt * 0.22
+      y += hp * dirt * 0.18
+      x += tanhf(x * x * x * (2 + dirt * 4)) * dirt * 0.18
+    }
+    x = max(-1, min(1, x))
+    y = max(-1, min(1, y))
   }
 }
