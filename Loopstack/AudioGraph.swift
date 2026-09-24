@@ -182,7 +182,9 @@ final class TapeSim: @unchecked Sendable {
   private var engaged: Float = 0
   private var sr: Double = 44100
   private var ch = [Channel(), Channel()]
-  private var delay = [[Float]](repeating: [Float](repeating: 0, count: 64), count: 2)
+  // Built separately so each channel owns its storage (a shared copy would be
+  // duplicated on first write, on the render thread).
+  private var delay: [[Float]] = (0..<2).map { _ in [Float](repeating: 0, count: 64) }
   private var w = 0
   private var wowPhase = 0.0, flutterPhase = 0.0
   private var wander = 0.0, wanderTarget = 0.0, wanderCount = 0
@@ -197,8 +199,8 @@ final class TapeSim: @unchecked Sendable {
   /// 2x oversampling filter around the saturator: 64-tap Blackman-windowed sinc,
   /// cutoff ~22 kHz at the 96 kHz rate. Saturation overtones above the base rate's
   /// Nyquist are filtered out instead of folding back as inharmonic grit.
-  private static let taps = 64
-  private static let fir: [Float] = {
+  static let taps = 64
+  static let fir: [Float] = {
     let n = taps, fc = 0.23
     var h = [Float](repeating: 0, count: n)
     let m = Double(n - 1) / 2
@@ -400,6 +402,56 @@ final class TapeSim: @unchecked Sendable {
     let m = powf(1 + powf(abs(u), 2.5), 0.4)
     let b = bias / powf(1 + powf(abs(bias), 2.5), 0.4)
     return u / m - b
+  }
+}
+
+/// Per-loop Drive: the tape effect's soft saturation curve, 2x oversampled (same
+/// filter) so driven highs don't alias, level-compensated so the control adds
+/// character rather than volume. One per channel per loop; render thread only.
+struct Drive2x {
+  private var up = [Float](repeating: 0, count: TapeSim.taps / 2)
+  private var upW = 0
+  private var down = [Float](repeating: 0, count: TapeSim.taps)
+  private var downW = 0
+
+  /// Input gain for a 0...1 control, and the makeup that holds a typical level.
+  static func gains(_ amount: Float) -> (drive: Float, makeup: Float) {
+    let g = 1 + max(0, min(1, amount)) * 5
+    let nominal: Float = 0.15
+    return (g, nominal / TapeSim.curve(g * nominal, bias: 0))
+  }
+
+  mutating func process(_ x: Float, drive g: Float, makeup: Float) -> Float {
+    let h = TapeSim.fir, half = TapeSim.taps / 2
+    up[upW] = x
+    var u0: Float = 0, u1: Float = 0
+    var i = upW
+    for k in 0..<half {
+      let v = up[i]
+      u0 += h[2 * k] * v
+      u1 += h[2 * k + 1] * v
+      i = i == 0 ? half - 1 : i - 1
+    }
+    upW = (upW + 1) % half
+    down[downW] = TapeSim.curve(u0 * 2 * g, bias: 0)
+    downW = (downW + 1) % TapeSim.taps
+    down[downW] = TapeSim.curve(u1 * 2 * g, bias: 0)
+    var y: Float = 0
+    var j = downW
+    for k in 0..<TapeSim.taps {
+      y += h[k] * down[j]
+      j = j == 0 ? TapeSim.taps - 1 : j - 1
+    }
+    downW = (downW + 1) % TapeSim.taps
+    return y * makeup
+  }
+
+  /// Back to silence in place (no allocation).
+  mutating func clear() {
+    for k in up.indices { up[k] = 0 }
+    for k in down.indices { down[k] = 0 }
+    upW = 0
+    downW = 0
   }
 }
 

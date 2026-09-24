@@ -312,7 +312,8 @@ struct LayersView: View {
               onVol: { engine.setLayerGain(layer.id, $0) },
               onPan: { engine.setLayerPan(layer.id, $0) },
               onDelay: { engine.setLayerDelay(layer.id, $0) },
-              onReverb: { engine.setLayerReverb(layer.id, $0) }
+              onReverb: { engine.setLayerReverb(layer.id, $0) },
+              extra: ("Drive", layer.drive, { engine.setLayerDrive(layer.id, $0) })
             )
           }
           .padding(8)

@@ -148,6 +148,7 @@ struct Layer: Identifiable {
   var muted: Bool
   var reversed: Bool
   var slot: LayerSlot
+  var drive: Float = 0
 }
 
 @MainActor
@@ -1230,6 +1231,13 @@ final class LoopEngine: ObservableObject {
   }
 
 
+  func setLayerDrive(_ id: String, _ drive: Float) {
+    if let i = layers.firstIndex(where: { $0.id == id }) {
+      layers[i].drive = drive
+      applyLayerMix(layers[i])
+    }
+  }
+
   func setLayerGain(_ id: String, _ gain: Float) {
     if let i = layers.firstIndex(where: { $0.id == id }) {
       layers[i].gain = gain
@@ -1285,7 +1293,7 @@ final class LoopEngine: ObservableObject {
   }
 
   private func applyLayerMix(_ layer: Layer) {
-    liveLayers.setMix(index: layer.slot.index, gain: layer.gain, pan: layer.pan, muted: layer.muted)
+    liveLayers.setMix(index: layer.slot.index, gain: layer.gain, pan: layer.pan, muted: layer.muted, drive: layer.drive)
     setSends(layer.slot, delay: layer.delay, reverb: layer.reverb)
   }
 

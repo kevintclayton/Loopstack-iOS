@@ -20,6 +20,8 @@ final class LiveLayers: @unchecked Sendable {
     var muted = false
     var reversed = false
     var active = false
+    /// Per-loop Drive 0...1 (applied at playback, non-destructive).
+    var drive: Float = 0
     /// Bumped whenever playback should (re)start (activation, transport start, replacement).
     var activation = 0
     var activatedAt: TimeInterval = 0
@@ -41,6 +43,12 @@ final class LiveLayers: @unchecked Sendable {
     var active = false
     var activation = 0
     var playhead = 0
+    var drive: Float = 0
+    /// Crossfade into the Drive path (it adds the oversampler's ~0.7 ms delay, so
+    /// switching it on/off fades over 10 ms instead of jumping).
+    var driveMix: Float = 0
+    var satL = Drive2x()
+    var satR = Drive2x()
     /// Where in the cycle (seconds) this loop's first sample plays; learned the first
     /// time it plays, then used to place it whenever the transport starts.
     var phase: Double = 0
@@ -65,7 +73,10 @@ final class LiveLayers: @unchecked Sendable {
   private var retired = RetireBin()
 
   // Render thread only.
-  private var voices: [Voice] = Array(repeating: Voice(), count: slotRange.count)
+  private var sampleRateForRender: Double = 44100
+  // Built one by one so every voice owns its saturator buffers (a repeated copy would
+  // share them and be duplicated on first use, on the render thread).
+  private var voices: [Voice] = slotRange.map { _ in Voice() }
   private var renderGen: UInt64 = 0
 
   init(clock: TransportClock) {
@@ -236,12 +247,13 @@ final class LiveLayers: @unchecked Sendable {
     _ = dead
   }
 
-  func setMix(index: Int, gain: Float, pan: Float, muted: Bool) {
+  func setMix(index: Int, gain: Float, pan: Float, muted: Bool, drive: Float = 0) {
     guard Self.slotRange.contains(index) else { return }
     lock.lock()
     slots[index].gain = gain
     slots[index].pan = pan
     slots[index].muted = muted
+    slots[index].drive = drive
     changed()
     lock.unlock()
   }
@@ -302,6 +314,7 @@ final class LiveLayers: @unchecked Sendable {
   /// `transportT` is the shared transport time at this buffer's first frame.
   private func syncVoices(transportT: Double) {
     let sr = sampleRate
+    sampleRateForRender = sr
     let now = CACurrentMediaTime()
     for i in slots.indices {
       let s = slots[i]
@@ -336,6 +349,7 @@ final class LiveLayers: @unchecked Sendable {
       voices[i].muted = s.muted
       voices[i].reversed = s.reversed
       voices[i].active = s.active
+      voices[i].drive = s.drive
       if s.active {
         voices[i].left = s.left
         voices[i].right = s.right
@@ -388,15 +402,42 @@ final class LiveLayers: @unchecked Sendable {
     guard a.count == n, b.count == n else { return }
     let gl = voices[si].gain * min(1, max(0, 1 - voices[si].pan))
     let gr = voices[si].gain * min(1, max(0, 1 + voices[si].pan))
-    for i in 0..<frames {
-      if wait > 0 {
-        wait -= 1
-        continue
+    let driveOn = voices[si].drive > 0.001
+    if driveOn || voices[si].driveMix > 0 {
+      // Drive path: per-sample saturation with a 10 ms crossfade on engage/disengage.
+      let (g, makeup) = Drive2x.gains(voices[si].drive)
+      let fade = Float(1 / (0.01 * sampleRateForRender))
+      var mix = voices[si].driveMix
+      for i in 0..<frames {
+        if wait > 0 {
+          wait -= 1
+          continue
+        }
+        let idx = head % n
+        let dl = a[idx] * gl, dr = b[idx] * gr
+        mix = driveOn ? min(1, mix + fade) : max(0, mix - fade)
+        let wl = voices[si].satL.process(dl, drive: g, makeup: makeup)
+        let wr = voices[si].satR.process(dr, drive: g, makeup: makeup)
+        outL[i] += dl + (wl - dl) * mix
+        if outR != outL { outR[i] += dr + (wr - dr) * mix }
+        head += 1
       }
-      let idx = head % n
-      outL[i] += a[idx] * gl
-      if outR != outL { outR[i] += b[idx] * gr }
-      head += 1
+      voices[si].driveMix = mix
+      if mix == 0 {
+        voices[si].satL.clear()
+        voices[si].satR.clear()
+      }
+    } else {
+      for i in 0..<frames {
+        if wait > 0 {
+          wait -= 1
+          continue
+        }
+        let idx = head % n
+        outL[i] += a[idx] * gl
+        if outR != outL { outR[i] += b[idx] * gr }
+        head += 1
+      }
     }
     voices[si].wait = wait
     voices[si].playhead = head
