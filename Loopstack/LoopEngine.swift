@@ -231,7 +231,8 @@ final class LoopEngine: ObservableObject {
   private let loopReverb = AVAudioUnitReverb()
   private let loopDelayBus = AVAudioMixerNode()
   private let loopReverbBus = AVAudioMixerNode()
-  /// Master bus: main mix -> peak limiter -> -1 dB ceiling trim -> output.
+  /// Master bus: main mix -> 35 Hz high-pass -> peak limiter -> -1 dB ceiling trim -> output.
+  private let masterHighPass = AVAudioUnitEQ(numberOfBands: 2)
   private let masterLimiter = AVAudioUnitEffect(audioComponentDescription: AudioComponentDescription(
     componentType: kAudioUnitType_Effect,
     componentSubType: kAudioUnitSubType_PeakLimiter,
@@ -393,10 +394,22 @@ final class LoopEngine: ObservableObject {
   /// transparent below 0 dBFS, no overs with +7 dB transients, <0.2% THD on
   /// limited bass at 3 ms attack (which is also the added latency).
   private func attachMasterBus(_ main: AVAudioMixerNode) {
+    engine.attach(masterHighPass)
     engine.attach(masterLimiter)
     engine.attach(masterOut)
     engine.disconnectNodeOutput(main)
-    engine.connect(main, to: masterLimiter, format: format)
+    // Sub-bass below ~35 Hz is felt more than heard, small speakers can't play it, and
+    // it made the limiter clamp the whole mix. 4th-order Butterworth (two 2nd-order
+    // stages, Q 0.541 and 1.307): measured -3 dB at 35 Hz, -1.1 dB at 41 Hz (E1),
+    // flat from 60 Hz, -19.5 dB at 20 Hz. Placed before the limiter so it never reacts to it.
+    for (band, q) in zip(masterHighPass.bands, [0.5412, 1.3066]) {
+      band.filterType = .resonantHighPass
+      band.frequency = 35
+      band.bandwidth = Float(2 / log(2) * asinh(1 / (2 * q)))  // Q expressed in octaves
+      band.bypass = false
+    }
+    engine.connect(main, to: masterHighPass, format: format)
+    engine.connect(masterHighPass, to: masterLimiter, format: format)
     engine.connect(masterLimiter, to: masterOut, format: format)
     let hw = engine.outputNode.inputFormat(forBus: 0)
     engine.connect(masterOut, to: engine.outputNode, format: hw.sampleRate > 0 ? hw : format)
