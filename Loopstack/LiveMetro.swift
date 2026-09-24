@@ -13,9 +13,28 @@ enum MetroTiming {
 }
 
 /// Click track generated in an already-running source node. No player play()/stop().
+///
+/// Threading: start/stop are queued commands the render thread applies at the top
+/// of its next cycle (when their effect would first be heard anyway). It collects
+/// them with `lock.try()` and never waits on the UI.
 final class LiveMetro: @unchecked Sendable {
-  var sampleRate: Double = 44100
+  private enum Command {
+    case start(bpm: Double, beats: Int, looping: Bool, origin: TimeInterval)
+    case stop
+  }
+
   private let lock = NSLock()
+  private var pending: [Command] = []
+  private var sharedRate: Double = 44100
+
+  var sampleRate: Double {
+    get { lock.lock(); defer { lock.unlock() }; return sharedRate }
+    set { lock.lock(); sharedRate = newValue; lock.unlock() }
+  }
+
+  // Render thread only.
+  private var inbox: [Command] = []
+  private var rate: Double = 44100
   private var enabled = false
   private var bpm: Double = 96
   private var origin: TimeInterval = 0
@@ -33,42 +52,63 @@ final class LiveMetro: @unchecked Sendable {
   /// joined mid-waveform (a partial click is a hard onset).
   private var resyncFloor = -Double.infinity
 
+  init() {
+    pending.reserveCapacity(64)
+    inbox.reserveCapacity(64)
+  }
+
   func start(bpm: Double, beats: Int, looping: Bool, origin: TimeInterval) {
     lock.lock()
-    self.bpm = max(40, bpm)
-    self.beats = max(1, beats)
-    self.looping = looping
-    // While running, re-express the playhead against the new origin so the click
-    // stream continues without a resync (count-in flows straight into recording).
-    if let p = playhead, enabled || drainUntil != nil {
-      playhead = p + (self.origin - origin)
-    } else {
-      playhead = nil
-    }
-    self.origin = origin
-    enabled = true
-    drainUntil = nil
+    pending.append(.start(bpm: bpm, beats: beats, looping: looping, origin: origin))
     lock.unlock()
   }
 
   func stop() {
     lock.lock()
-    if enabled, let p = playhead {
-      drainUntil = p
-    } else if drainUntil == nil {
-      playhead = nil
-    }
-    enabled = false
+    pending.append(.stop)
     lock.unlock()
+  }
+
+  /// Render thread.
+  private func apply(_ c: Command) {
+    switch c {
+    case let .start(bpm, beats, looping, origin):
+      self.bpm = max(40, bpm)
+      self.beats = max(1, beats)
+      self.looping = looping
+      // While running, re-express the playhead against the new origin so the click
+      // stream continues without a resync (count-in flows straight into recording).
+      if let p = playhead, enabled || drainUntil != nil {
+        playhead = p + (self.origin - origin)
+      } else {
+        playhead = nil
+      }
+      self.origin = origin
+      enabled = true
+      drainUntil = nil
+    case .stop:
+      if enabled, let p = playhead {
+        drainUntil = p
+      } else if drainUntil == nil {
+        playhead = nil
+      }
+      enabled = false
+    }
   }
 
   func render(frames: Int, list: UnsafeMutablePointer<AudioBufferList>) {
     guard frames > 0 else { return }
     AudioBuf.zero(list, frames: frames)
-    lock.lock()
+    if lock.try() {
+      swap(&pending, &inbox)
+      rate = sharedRate
+      lock.unlock()
+      for c in inbox { apply(c) }
+      inbox.removeAll(keepingCapacity: true)
+    }
     let on = enabled
     let drain = drainUntil
-    let sr = max(sampleRate, 8000)
+    let sr = max(rate, 8000)
     let bpm = self.bpm
     let beats = self.beats
     let looping = self.looping
@@ -82,24 +122,20 @@ final class LiveMetro: @unchecked Sendable {
     let minStart = resyncFloor
     let t1 = t0 + Double(frames) / sr
     playhead = t1
-    lock.unlock()
     let beatSec = MetroTiming.beatSec(bpm: bpm)
     let clickSec = 0.04
     if !on {
       guard let drain else { return }
       if t0 >= drain + clickSec {
-        lock.lock()
-        if drainUntil == drain { drainUntil = nil; playhead = nil }
-        lock.unlock()
+        drainUntil = nil
+        playhead = nil
         return
       }
     }
     let stopAt = on ? Double.infinity : (drain ?? 0)
     if !looping, t0 >= Double(beats) * beatSec + clickSec {
-      lock.lock()
       enabled = false
       playhead = nil
-      lock.unlock()
       return
     }
     var b = Int(floor((t0 - clickSec) / beatSec))
