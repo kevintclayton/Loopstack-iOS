@@ -90,6 +90,10 @@ final class TransportClock: @unchecked Sendable {
   private var gen: UInt64 = 0
   private var anchor: (key: Double, t: Double)?
   private var fallbackKey: Double = 0
+  private var publishPending = false
+  /// The render thread's current sample-time → transport-time mapping, for the record
+  /// tap (tap timestamps share the render sample timeline, measured exact to the sample).
+  private var sharedAnchor: (key: Double, t: Double, gen: UInt64)?
 
   /// Main thread: a new cycle origin (transport start / restart).
   func set(cycleStart: TimeInterval, sampleRate: Double) {
@@ -122,11 +126,33 @@ final class TransportClock: @unchecked Sendable {
     let wall = CACurrentMediaTime() - start
     if let a = anchor {
       let t = a.t + (key - a.key) / rate
-      if abs(t - wall) < 0.08 { return (t, start, rate) }
+      if abs(t - wall) < 0.08 {
+        publishAnchor()
+        return (t, start, rate)
+      }
     }
     // First use after a start, or a big slip (interruption, route change).
     anchor = (key, wall)
+    publishPending = true
+    publishAnchor()
     return (wall, start, rate)
+  }
+
+  /// Render thread. Shares a new anchor with the tap; retried next buffer if the lock is busy.
+  private func publishAnchor() {
+    guard publishPending, let a = anchor, lock.try() else { return }
+    sharedAnchor = (a.key, a.t, gen)
+    publishPending = false
+    lock.unlock()
+  }
+
+  /// Tap thread. Transport time (seconds since cycle start) of a render sample time, or
+  /// nil until the render thread has anchored the current transport start.
+  func transportTime(sampleTime: Double) -> Double? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let a = sharedAnchor, a.gen == sharedGen else { return nil }
+    return a.t + (sampleTime - a.key) / sharedRate
   }
 }
 
@@ -172,11 +198,23 @@ final class PeakMeter: @unchecked Sendable {
 final class TapeSim: @unchecked Sendable {
   private let lock = NSLock()
   private var sharedAmount: Float = 0
+  private var sharedWear: Float = 0
   private var sharedRate: Double = 44100
 
   // Render thread.
   private var target: Float = 0
   private var amt: Float = 0
+  private var targetWear: Float = 0
+  private var wear: Float = 0
+  /// Wobble delay line length (power of two): room for Wear's deep, slow pitch bends.
+  private static let lineLen = 2048
+  /// Base delay (samples) glides with Wear so turning it up never jumps.
+  private var base = 8.0
+  private var wornPhase = 0.0, slowPhase = 0.0
+  private var dropPos = 0, dropLen = 0
+  private var dropFloor: Float = 1
+  /// Samples written since engaging: the crossfade in waits until the line holds audio.
+  private var filled = 0
   /// 0...1 crossfade from the untouched signal to the tape path. Engaging adds the
   /// wobble's tiny delay, so switching on/off fades over 10 ms instead of jumping.
   private var engaged: Float = 0
@@ -184,16 +222,28 @@ final class TapeSim: @unchecked Sendable {
   private var ch = [Channel(), Channel()]
   // Built separately so each channel owns its storage (a shared copy would be
   // duplicated on first write, on the render thread).
-  private var delay: [[Float]] = (0..<2).map { _ in [Float](repeating: 0, count: 64) }
+  private var delay: [[Float]] = (0..<2).map { _ in [Float](repeating: 0, count: TapeSim.lineLen) }
   private var w = 0
   private var wowPhase = 0.0, flutterPhase = 0.0
   private var wander = 0.0, wanderTarget = 0.0, wanderCount = 0
   private var rng = RTRandom()
   /// False only for measuring the rest of the chain without transport wobble.
   private let wobble: Bool
+  /// Per-channel block scratch. Raw memory (allocated once) so the block stages never
+  /// overlap Swift's exclusive access to the channel state.
+  private let scratch: [UnsafeMutablePointer<Float>]
 
   init(wobble: Bool = true) {
     self.wobble = wobble
+    scratch = (0..<2).map { _ in
+      let p = UnsafeMutablePointer<Float>.allocate(capacity: Oversampler2x.maxFrames)
+      p.initialize(repeating: 0, count: Oversampler2x.maxFrames)
+      return p
+    }
+  }
+
+  deinit {
+    for p in scratch { p.deallocate() }
   }
 
   /// 2x oversampling filter around the saturator: 64-tap Blackman-windowed sinc,
@@ -218,22 +268,44 @@ final class TapeSim: @unchecked Sendable {
   private struct Channel {
     var emphLP: Float = 0       // splits pre-emphasis
     var deemphLP: Float = 0     // splits de-emphasis
-    var up = [Float](repeating: 0, count: TapeSim.taps / 2)  // base-rate input history
-    var upW = 0
-    var down = [Float](repeating: 0, count: TapeSim.taps)    // 2x-rate saturated history
-    var downW = 0
+    var ov = Oversampler2x()
     var dc: Float = 0, dcIn: Float = 0
     var bump = Biquad()
-    var top = Biquad()
+    var top = SVFLowpass()
 
     /// Back to silence without reallocating (safe on the render thread).
     mutating func clear() {
       emphLP = 0; deemphLP = 0; dc = 0; dcIn = 0
-      for i in up.indices { up[i] = 0 }
-      for i in down.indices { down[i] = 0 }
-      upW = 0; downW = 0
-      bump.z1 = 0; bump.z2 = 0; top.z1 = 0; top.z2 = 0
+      ov.clear()
+      bump.z1 = 0; bump.z2 = 0; top.clear()
     }
+  }
+
+  /// 2-pole low-pass, state-variable (TPT) form: its cutoff can move while audio runs
+  /// without the transients a biquad makes when its coefficients jump (Wear sweeps the
+  /// top end from 16 kHz to ~4.5 kHz). Butterworth Q, same response as the RBJ low-pass.
+  struct SVFLowpass {
+    private var ic1: Float = 0, ic2: Float = 0
+    private var a1: Float = 1, a2: Float = 0, a3: Float = 0
+
+    mutating func set(f: Double, sr: Double) {
+      let g = tan(Double.pi * min(f, sr * 0.45) / sr), k = 2.0.squareRoot()
+      let d = 1 / (1 + g * (g + k))
+      a1 = Float(d)
+      a2 = Float(g * d)
+      a3 = Float(g * g * d)
+    }
+
+    mutating func run(_ v0: Float) -> Float {
+      let v3 = v0 - ic2
+      let v1 = a1 * ic1 + a2 * v3
+      let v2 = ic2 + a2 * ic1 + a3 * v3
+      ic1 = 2 * v1 - ic1
+      ic2 = 2 * v2 - ic2
+      return v2
+    }
+
+    mutating func clear() { ic1 = 0; ic2 = 0 }
   }
 
   struct Biquad {
@@ -269,23 +341,33 @@ final class TapeSim: @unchecked Sendable {
     lock.unlock()
   }
 
+  /// Wear: the tape's condition, from pristine to worn out and running at the wrong
+  /// speed (deep irregular warble, slow drift, dull top, dropouts). Main thread.
+  func set(wear: Float) {
+    lock.lock()
+    sharedWear = max(0, min(1, wear))
+    lock.unlock()
+  }
+
   private func design() {
-    let a = Double(amt)
+    let a = Double(amt), wr = Double(wear)
     for c in 0..<2 {
       ch[c].bump.peak(f: 80, q: 0.9, gainDB: 2.0 * a, sr: sr)
-      ch[c].top.lowpass(f: 16000 - 5000 * a, sr: sr)
+      // Worn oxide loses the top end: 16 kHz down to ~4.5 kHz at full Wear.
+      ch[c].top.set(f: min(16000 - 5000 * a, 16000 - 11500 * wr), sr: sr)
     }
   }
 
   func process(_ list: UnsafeMutablePointer<AudioBufferList>, frames: Int) {
     if lock.try() {
       target = sharedAmount
+      targetWear = sharedWear
       if sharedRate != sr { sr = sharedRate; design() }
       lock.unlock()
     }
     // Fully off and settled: leave the audio untouched, and start clean next time.
-    if target == 0 && engaged == 0 {
-      if amt != 0 { reset() }
+    if target == 0 && targetWear == 0 && engaged == 0 {
+      if amt != 0 || wear != 0 { reset() }
       return
     }
     let bufs = UnsafeMutableAudioBufferListPointer(list)
@@ -295,9 +377,10 @@ final class TapeSim: @unchecked Sendable {
       ? bufs[1].mData!.assumingMemoryBound(to: Float.self) : L
     let chans = R == L ? 1 : 2
     // Smooth the control once per buffer (no zipper), redesign filters when it moves.
-    let prevAmt = amt
+    let prevAmt = amt, prevWear = wear
     amt += (target - amt) * 0.25
-    if abs(amt - prevAmt) > 0.0005 { design() }
+    wear += (targetWear - wear) * 0.25
+    if abs(amt - prevAmt) > 0.0005 || abs(wear - prevWear) > 0.0005 { design() }
     let a = amt
     let drive: Float = 1 + a * 3.2
     let emphK: Float = 1 + a * 1.5                                       // up to +8 dB shelf
@@ -309,51 +392,101 @@ final class TapeSim: @unchecked Sendable {
     let wobbleAmt = wobble ? Double(a) : 0
     let wowDepth = 0.00055 * wobbleAmt * sr / (2 * Double.pi * 0.7)       // +/-0.055% pitch
     let flutterDepth = 0.00025 * wobbleAmt * sr / (2 * Double.pi * 7.1)   // +/-0.025% pitch
-    let base = 8.0
+    // Worn tape: deep slow warble (+/-1.2% pitch, ~0.55 Hz, wandering), a slower speed
+    // drift (+/-0.4%, 0.11 Hz) and extra flutter (+/-0.15%). Depths are delay swings.
+    let wr = wobble ? Double(wear) : 0
+    let wornDepth = 0.012 * wr * sr / (2 * Double.pi * 0.55)
+    let slowDepth = 0.004 * wr * sr / (2 * Double.pi * 0.11)
+    let wornFlutter = 0.0015 * wr * sr / (2 * Double.pi * 7.1)
+    let totalDepth = wowDepth + flutterDepth + wornDepth + slowDepth + wornFlutter
+    let baseTarget = 8 + 1.15 * totalDepth
+    // Engaging from bypass: start at the right delay (the crossfade covers the change).
+    if engaged == 0 && filled == 0 { base = baseTarget }
+    let dropRate = 0.4 * Double(wear) / sr                                // dropouts per sample
+    let mask = Self.lineLen - 1
     let fadeStep = Float(1 / (0.01 * sr))
-    let fadeTo: Float = target > 0 ? 1 : 0
-    for i in 0..<frames {
-      if engaged != fadeTo { engaged = fadeTo > engaged ? min(1, engaged + fadeStep) : max(0, engaged - fadeStep) }
-      let e = engaged
-      // Transport: wow with a slowly wandering rate, plus flutter.
-      if wanderCount <= 0 { wanderTarget = rng.unit() * 2 - 1; wanderCount = Int(sr * 0.25) }
-      wanderCount -= 1
-      wander += (wanderTarget - wander) * 0.00002
-      wowPhase += 2 * Double.pi * 0.7 * (1 + 0.25 * wander) / sr
-      flutterPhase += 2 * Double.pi * 7.1 / sr
-      if wowPhase > 2 * Double.pi { wowPhase -= 2 * Double.pi }
-      if flutterPhase > 2 * Double.pi { flutterPhase -= 2 * Double.pi }
-      let dly = base + wowDepth * sin(wowPhase) + flutterDepth * sin(flutterPhase)
+    let fadeTo: Float = target > 0 || targetWear > 0 ? 1 : 0
+    var start = 0
+    while start < frames {
+      let n = min(Oversampler2x.maxFrames, frames - start)
+      // Per channel, over the whole chunk: pre-emphasis, 2x-oversampled saturation (block),
+      // then de-emphasis, DC removal, head bump and top roll-off.
       for c in 0..<chans {
-        let io = c == 0 ? L : R
-        let dry = io[i]
-        var x = dry
-        // Pre-emphasis: split at 3 kHz, lift the highs into the saturator.
-        ch[c].emphLP += emphA * (x - ch[c].emphLP)
-        x = ch[c].emphLP + (x - ch[c].emphLP) * emphK
-        // Saturation at 2x: upsample (polyphase), saturate both samples, downsample.
-        x = saturate2x(&ch[c], x, drive: drive, bias: bias) * makeup
-        // De-emphasis: the exact inverse shelf.
-        ch[c].deemphLP += deemphA * (x - ch[c].deemphLP)
-        x = ch[c].deemphLP + (x - ch[c].deemphLP) / emphK
-        // Remove the DC the asymmetry adds.
-        let y = x - ch[c].dcIn + 0.9995 * ch[c].dc
-        ch[c].dcIn = x
-        ch[c].dc = y
-        x = ch[c].bump.run(y)
-        x = ch[c].top.run(x)
-        // Wow/flutter: fractional delay with 4-point Hermite interpolation.
-        delay[c][w] = x
-        let rpos = Double(w) - dly
-        var ip = Int(floor(rpos))
-        let f = Float(rpos - Double(ip))
-        ip = (ip % 64 + 64) % 64
-        let xm1 = delay[c][(ip + 63) % 64], x0 = delay[c][ip], x1 = delay[c][(ip + 1) % 64], x2 = delay[c][(ip + 2) % 64]
-        let c1 = 0.5 * (x1 - xm1), c2 = xm1 - 2.5 * x0 + 2 * x1 - 0.5 * x2, c3 = 0.5 * (x2 - xm1) + 1.5 * (x0 - x1)
-        let wet = ((c3 * f + c2) * f + c1) * f + x0
-        io[i] = e >= 1 ? wet : dry + (wet - dry) * e
+        let io = (c == 0 ? L : R) + start
+        let t = scratch[c]
+        for i in 0..<n {
+          let x = io[i]
+          ch[c].emphLP += emphA * (x - ch[c].emphLP)
+          t[i] = ch[c].emphLP + (x - ch[c].emphLP) * emphK
+        }
+        ch[c].ov.process(t, n, drive: drive, bias: bias, makeup: makeup)
+        for i in 0..<n {
+          var x = t[i]
+          ch[c].deemphLP += deemphA * (x - ch[c].deemphLP)
+          x = ch[c].deemphLP + (x - ch[c].deemphLP) / emphK
+          let y = x - ch[c].dcIn + 0.9995 * ch[c].dc
+          ch[c].dcIn = x
+          ch[c].dc = y
+          x = ch[c].bump.run(y)
+          t[i] = ch[c].top.run(x)
+        }
       }
-      w = (w + 1) % 64
+      // Per sample: the shared transport wobble and the on/off crossfade.
+      for i in 0..<n {
+        if filled < Self.lineLen { filled += 1 }
+        // Fade in only once the line holds more audio than the delay reads back.
+        let ready = Double(filled) > base + 4
+        if engaged != fadeTo, fadeTo == 0 || ready {
+          engaged = fadeTo > engaged ? min(1, engaged + fadeStep) : max(0, engaged - fadeStep)
+        }
+        let e = engaged
+        if wanderCount <= 0 { wanderTarget = rng.unit() * 2 - 1; wanderCount = Int(sr * 0.25) }
+        wanderCount -= 1
+        wander += (wanderTarget - wander) * 0.00002
+        wowPhase += 2 * Double.pi * 0.7 * (1 + 0.25 * wander) / sr
+        flutterPhase += 2 * Double.pi * 7.1 / sr
+        wornPhase += 2 * Double.pi * 0.55 * (1 + 0.35 * wander) / sr
+        slowPhase += 2 * Double.pi * 0.11 * (1 - 0.3 * wander) / sr
+        if wowPhase > 2 * Double.pi { wowPhase -= 2 * Double.pi }
+        if flutterPhase > 2 * Double.pi { flutterPhase -= 2 * Double.pi }
+        if wornPhase > 2 * Double.pi { wornPhase -= 2 * Double.pi }
+        if slowPhase > 2 * Double.pi { slowPhase -= 2 * Double.pi }
+        base += (baseTarget - base) * 0.0002
+        // The swing can never exceed the delay available, so the read never gets ahead of
+        // the write; as Wear rises the base glides up and the warble grows with it.
+        let k = totalDepth > 0 ? min(1, max(0, (base - 4) / totalDepth)) : 0
+        let dly = base + k * (wowDepth * sin(wowPhase) + (flutterDepth + wornFlutter) * sin(flutterPhase)
+          + wornDepth * sin(wornPhase) + slowDepth * sin(slowPhase))
+        // Dropouts: worn oxide briefly loses level (3-9 dB, 40-200 ms, smooth edges).
+        var dropGain: Float = 1
+        if dropLen == 0 {
+          if rng.unit() < dropRate {
+            dropLen = Int(sr * (0.04 + 0.16 * rng.unit()))
+            dropPos = 0
+            dropFloor = powf(10, -Float(3 + 6 * rng.unit()) * wear / 20)
+          }
+        } else {
+          dropGain = 1 - (1 - dropFloor) * Float(sin(Double.pi * Double(dropPos) / Double(dropLen)))
+          dropPos += 1
+          if dropPos >= dropLen { dropLen = 0 }
+        }
+        for c in 0..<chans {
+          let io = (c == 0 ? L : R) + start
+          let dry = io[i]
+          // Wow/flutter: fractional delay with 4-point Hermite interpolation.
+          delay[c][w] = scratch[c][i]
+          let rpos = Double(w) - dly
+          var ip = Int(floor(rpos))
+          let f = Float(rpos - Double(ip))
+          ip &= mask
+          let xm1 = delay[c][(ip - 1) & mask], x0 = delay[c][ip], x1 = delay[c][(ip + 1) & mask], x2 = delay[c][(ip + 2) & mask]
+          let c1 = 0.5 * (x1 - xm1), c2 = xm1 - 2.5 * x0 + 2 * x1 - 0.5 * x2, c3 = 0.5 * (x2 - xm1) + 1.5 * (x0 - x1)
+          let wet = (((c3 * f + c2) * f + c1) * f + x0) * dropGain
+          io[i] = e >= 1 ? wet : dry + (wet - dry) * e
+        }
+        w = (w + 1) & mask
+      }
+      start += n
     }
   }
 
@@ -361,38 +494,17 @@ final class TapeSim: @unchecked Sendable {
   /// keys chord within ~0.6 dB across the whole control).
   static let nominal: Float = 0.15
 
-  @inline(__always) private func saturate2x(_ c: inout Channel, _ x: Float, drive: Float, bias: Float) -> Float {
-    let h = Self.fir, half = Self.taps / 2
-    c.up[c.upW] = x
-    // Polyphase upsample: even and odd phases of the filter (x2 for the zero stuffing).
-    var u0: Float = 0, u1: Float = 0
-    var idx = c.upW
-    for k in 0..<half {
-      let v = c.up[idx]
-      u0 += h[2 * k] * v
-      u1 += h[2 * k + 1] * v
-      idx = idx == 0 ? half - 1 : idx - 1
-    }
-    c.upW = (c.upW + 1) % half
-    // Saturate at the 2x rate, then filter and keep every other sample.
-    c.down[c.downW] = Self.curve(u0 * 2 * drive, bias: bias)
-    c.downW = (c.downW + 1) % Self.taps
-    c.down[c.downW] = Self.curve(u1 * 2 * drive, bias: bias)
-    var y: Float = 0
-    var j = c.downW
-    for k in 0..<Self.taps {
-      y += h[k] * c.down[j]
-      j = j == 0 ? Self.taps - 1 : j - 1
-    }
-    c.downW = (c.downW + 1) % Self.taps
-    return y
-  }
+
 
   private func reset() {
     amt = 0
+    wear = 0
+    base = 8
+    dropLen = 0
+    filled = 0
     ch[0].clear()  // in place: no allocation on the render thread
     ch[1].clear()
-    for c in 0..<2 { for k in 0..<64 { delay[c][k] = 0 } }
+    for c in 0..<2 { for k in 0..<Self.lineLen { delay[c][k] = 0 } }
     design()
   }
 
@@ -405,53 +517,79 @@ final class TapeSim: @unchecked Sendable {
   }
 }
 
-/// Per-loop Drive: the tape effect's soft saturation curve, 2x oversampled (same
-/// filter) so driven highs don't alias, level-compensated so the control adds
-/// character rather than volume. One per channel per loop; render thread only.
-struct Drive2x {
-  private var up = [Float](repeating: 0, count: TapeSim.taps / 2)
-  private var upW = 0
-  private var down = [Float](repeating: 0, count: TapeSim.taps)
-  private var downW = 0
+/// 2x oversampled saturation over a whole buffer, done with Accelerate so it's cheap in
+/// any build. (The per-sample Swift version cost ~90% of a core per loop in Debug builds
+/// and broke up the audio.) Same filter and curve as before: zero-stuff to 2x, 64-tap
+/// low-pass, soft curve u/(1+|u|^2.5)^0.4 (with optional bias), low-pass and keep every
+/// other sample. Overlap-save history carries across buffers. Render thread only.
+struct Oversampler2x {
+  static let maxFrames = 4096
+  private static let hist = TapeSim.taps - 1
+  private var up: [Float]
+  private var down: [Float]
+  private var mag: [Float]
 
+  init() {
+    up = [Float](repeating: 0, count: Self.hist + 2 * Self.maxFrames)
+    down = [Float](repeating: 0, count: Self.hist + 2 * Self.maxFrames)
+    mag = [Float](repeating: 0, count: 2 * Self.maxFrames)
+  }
+
+  /// In place on `x[0..<n]` (n <= maxFrames): output = curve(drive * x + bias) - curve(bias), * makeup.
+  mutating func process(_ x: UnsafeMutablePointer<Float>, _ n: Int, drive: Float, bias: Float, makeup: Float) {
+    guard n > 0, n <= Self.maxFrames else { return }
+    let H = Self.hist, taps = TapeSim.taps, n2 = 2 * n
+    let fir = TapeSim.fir
+    // The curve's value at zero input (the DC the bias adds); subtracting it matches TapeSim.curve.
+    let offset = -(bias / powf(1 + powf(abs(bias), 2.5), 0.4))
+    up.withUnsafeMutableBufferPointer { U in
+      down.withUnsafeMutableBufferPointer { D in
+        mag.withUnsafeMutableBufferPointer { M in
+          fir.withUnsafeBufferPointer { F in
+            let u = U.baseAddress!, d = D.baseAddress!, m = M.baseAddress!, f = F.baseAddress!
+            // Zero-stuff into the upsampling buffer after its history (x2 for the zeros).
+            vDSP_vclr(u + H, 1, vDSP_Length(n2))
+            var two: Float = 2
+            vDSP_vsmul(x, 1, &two, u + H, 2, vDSP_Length(n))
+            // Low-pass at 2x (filter is symmetric, so correlation == convolution).
+            vDSP_conv(u, 1, f, 1, d + H, 1, vDSP_Length(n2), vDSP_Length(taps))
+            memmove(u, u + n2, H * MemoryLayout<Float>.size)
+            // Saturate at 2x: y = v / (1 + |v|^2.5)^0.4, v = drive*u + bias.
+            var g = drive, b = bias, one: Float = 1, e1: Float = 2.5, e2: Float = 0.4, off = offset
+            var count = Int32(n2)
+            vDSP_vsmsa(d + H, 1, &g, &b, d + H, 1, vDSP_Length(n2))
+            vDSP_vabs(d + H, 1, m, 1, vDSP_Length(n2))
+            vvpowsf(m, &e1, m, &count)
+            vDSP_vsadd(m, 1, &one, m, 1, vDSP_Length(n2))
+            vvpowsf(m, &e2, m, &count)
+            vDSP_vdiv(m, 1, d + H, 1, d + H, 1, vDSP_Length(n2))
+            vDSP_vsadd(d + H, 1, &off, d + H, 1, vDSP_Length(n2))
+            // Low-pass and keep every other sample, then level.
+            vDSP_desamp(d, 2, f, x, vDSP_Length(n), vDSP_Length(taps))
+            var mk = makeup
+            vDSP_vsmul(x, 1, &mk, x, 1, vDSP_Length(n))
+            memmove(d, d + n2, H * MemoryLayout<Float>.size)
+          }
+        }
+      }
+    }
+  }
+
+  /// Back to silence in place (no allocation).
+  mutating func clear() {
+    up.withUnsafeMutableBufferPointer { vDSP_vclr($0.baseAddress!, 1, vDSP_Length($0.count)) }
+    down.withUnsafeMutableBufferPointer { vDSP_vclr($0.baseAddress!, 1, vDSP_Length($0.count)) }
+  }
+}
+
+/// Per-loop Drive gain law: the tape effect's soft curve (processed by Oversampler2x),
+/// level-compensated so the control adds character rather than volume.
+enum Drive2x {
   /// Input gain for a 0...1 control, and the makeup that holds a typical level.
   static func gains(_ amount: Float) -> (drive: Float, makeup: Float) {
     let g = 1 + max(0, min(1, amount)) * 5
     let nominal: Float = 0.15
     return (g, nominal / TapeSim.curve(g * nominal, bias: 0))
-  }
-
-  mutating func process(_ x: Float, drive g: Float, makeup: Float) -> Float {
-    let h = TapeSim.fir, half = TapeSim.taps / 2
-    up[upW] = x
-    var u0: Float = 0, u1: Float = 0
-    var i = upW
-    for k in 0..<half {
-      let v = up[i]
-      u0 += h[2 * k] * v
-      u1 += h[2 * k + 1] * v
-      i = i == 0 ? half - 1 : i - 1
-    }
-    upW = (upW + 1) % half
-    down[downW] = TapeSim.curve(u0 * 2 * g, bias: 0)
-    downW = (downW + 1) % TapeSim.taps
-    down[downW] = TapeSim.curve(u1 * 2 * g, bias: 0)
-    var y: Float = 0
-    var j = downW
-    for k in 0..<TapeSim.taps {
-      y += h[k] * down[j]
-      j = j == 0 ? TapeSim.taps - 1 : j - 1
-    }
-    downW = (downW + 1) % TapeSim.taps
-    return y * makeup
-  }
-
-  /// Back to silence in place (no allocation).
-  mutating func clear() {
-    for k in up.indices { up[k] = 0 }
-    for k in down.indices { down[k] = 0 }
-    upW = 0
-    downW = 0
   }
 }
 
@@ -465,13 +603,19 @@ enum AudioGraph {
     synth: LiveSynth,
     sampler: LiveSampler,
     tape: TapeSim,
+    arp: LiveArp,
+    clock: TransportClock,
     outRate: Double
   ) -> AVAudioSourceNode {
     let synth = synth
     let sampler = sampler
     let tape = tape
+    let arp = arp
+    let clock = clock
     let outRate = outRate
-    return AVAudioSourceNode(format: format) { _, _, frameCount, abl -> OSStatus in
+    return AVAudioSourceNode(format: format) { _, ts, frameCount, abl -> OSStatus in
+      // The arp places this buffer's steps on the synth before it renders.
+      arp.process(ts, frames: Int(frameCount), clock: clock, synth: synth)
       synth.render(frames: Int(frameCount), list: abl)
       sampler.renderAdd(frames: Int(frameCount), list: abl, dstRate: outRate)
       // Tape sits on the keys channel, before its delay and reverb.
@@ -491,8 +635,8 @@ enum AudioGraph {
   /// Always-on tap, installed before engine.start. Captures keys after delay/reverb.
   static func installPostTap(on node: AVAudioNode, format: AVAudioFormat, layers: LiveLayers) {
     let layers = layers
-    node.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-      layers.punchIn(buffer: buffer)
+    node.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, when in
+      layers.punchIn(buffer: buffer, when: when)
     }
   }
 

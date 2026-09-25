@@ -1,4 +1,5 @@
 import AVFoundation
+import Accelerate
 import Foundation
 
 enum InstrumentPreset: String, CaseIterable, Identifiable, Codable {
@@ -16,7 +17,7 @@ enum InstrumentPreset: String, CaseIterable, Identifiable, Codable {
   var defaultWave: OscWave {
     switch self {
     case .keys: return .warm
-    case .bass: return .sine
+    case .bass: return .fm
     case .pluck: return .triangle
     case .pad: return .sine
     case .noise: return .noise
@@ -25,7 +26,7 @@ enum InstrumentPreset: String, CaseIterable, Identifiable, Codable {
 }
 
 enum OscWave: String, CaseIterable, Identifiable, Codable {
-  case warm, sine, triangle, saw, square, pulse, noise
+  case warm, sine, triangle, saw, square, pulse, noise, fm
   var id: String { rawValue }
   var label: String {
     switch self {
@@ -36,6 +37,7 @@ enum OscWave: String, CaseIterable, Identifiable, Codable {
     case .square: return "Sqr"
     case .pulse: return "Pulse"
     case .noise: return "Noise"
+    case .fm: return "FM"
     }
   }
 }
@@ -110,6 +112,9 @@ enum AudioDSP {
     loopBars: Int,
     format: AVAudioFormat,
     acoustic: Bool = false,
+    analog: Bool = false,
+    neon: Bool = false,
+    sampler: SamplerCharacter? = nil,
     fixedGain: Float? = nil
   ) -> AVAudioPCMBuffer {
     let sampleRate = format.sampleRate
@@ -132,7 +137,7 @@ enum AudioDSP {
     let sixteenth = beatSec / 4
     let repeats = max(1, loopBars / max(1, pattern.bars))
     var rng = DrumRng(seed: drumSeed(pattern, bpm: bpm, bars: loopBars))
-    struct Placed { var t: Double; var vel: Float; var voice: DrumVoice; var pan: DrumPan }
+    struct Placed { var t: Double; var vel: Float; var voice: DrumVoice; var pan: DrumPan; var step: Int }
     var placed: [Placed] = []
     placed.reserveCapacity(pattern.hits.count * repeats)
     for rep in 0..<repeats {
@@ -144,7 +149,7 @@ enum AudioDSP {
         }
         var vel = hit.vel
         humanize(hit.voice, t: &t, vel: &vel, rng: &rng)
-        placed.append(Placed(t: t, vel: vel, voice: hit.voice, pan: DrumPan.kit(hit.voice, step: hit.step)))
+        placed.append(Placed(t: t, vel: vel, voice: hit.voice, pan: DrumPan.kit(hit.voice, step: hit.step), step: hit.step))
       }
     }
     placed.sort { a, b in
@@ -153,6 +158,9 @@ enum AudioDSP {
       if a.voice != .ohat && b.voice == .ohat { return true }
       return a.voice.rawValue < b.voice.rawValue
     }
+    // Neon: what the snare, clap and toms send to the gated reverb, and where each opens the gate.
+    var send: [Float] = neon ? [Float](repeating: 0, count: frames) : []
+    var gateAt: [Int] = []
     for hit in placed {
       let at = Int((hit.t * sampleRate).rounded())
       let destL = hit.voice == .ohat ? oL : L
@@ -160,7 +168,14 @@ enum AudioDSP {
       if hit.voice == .hat {
         chokeOpenHats(oL, oR, from: at, frames: frames, sr: sampleRate)
       }
-      if acoustic {
+      if neon {
+        send.withUnsafeMutableBufferPointer { s in
+          renderNeon(hit.voice, destL, destR, s.baseAddress!, frames, sampleRate, at, hit.vel, step: hit.step, pan: hit.pan)
+        }
+        if hit.voice == .snare || hit.voice == .clap || hit.voice == .tom { gateAt.append(at) }
+      } else if analog {
+        renderAnalog(hit.voice, destL, destR, frames, sampleRate, at, hit.vel, step: hit.step, pan: hit.pan)
+      } else if acoustic {
         let n = AcousticKit.mix(hit.voice, vel: hit.vel, destL, destR, frames, sampleRate, at, pan: hit.pan)
         if n == 0 {
           renderVoice(hit.voice, destL, destR, frames, sampleRate, at, hit.vel, pan: hit.pan)
@@ -172,6 +187,13 @@ enum AudioDSP {
     for i in 0..<frames {
       L[i] += oL[i]
       R[i] += oR[i]
+    }
+    if let character = sampler {
+      applySampler(character, L, R, frames, sampleRate)
+    }
+    if neon {
+      // After the sampler: the era's digital reverbs were cleaner than its drum samples.
+      addGatedReverb(L, R, send: send, gateAt: gateAt, frames: frames, sr: sampleRate, bpm: bpm)
     }
     if acoustic {
       // Recorded drums peak far above their body. Instead of turning the whole pattern
@@ -189,7 +211,42 @@ enum AudioDSP {
     } else {
       normalize(L, R, frames)
     }
+    if let character = sampler {
+      // Set after normalising (which would undo it before).
+      var g = character.level
+      vDSP_vsmul(L, 1, &g, L, 1, vDSP_Length(frames))
+      if R != L { vDSP_vsmul(R, 1, &g, R, 1, vDSP_Length(frames)) }
+    }
     return buf
+  }
+
+  /// Runs the rendered kit through a vintage sampler. Works at a fixed internal level
+  /// (peak to 0.95) so quiet patterns aren't crushed harder, then restores the level.
+  static func applySampler(_ c: SamplerCharacter, _ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double) {
+    var peak: Float = 1e-6
+    for i in 0..<frames { peak = max(peak, abs(L[i]), abs(R[i])) }
+    let pre = 0.95 / peak
+    let steps = Double(1 << (c.bits - 1))
+    let hold = sr / c.rate
+    let drive = c.drive, norm = tanh(c.drive)
+    var lpL = Biquad2(), lpR = Biquad2(), lpL2 = Biquad2(), lpR2 = Biquad2()
+    lpL.lowpass(c.lowpass, 0.707, sr); lpR.lowpass(c.lowpass, 0.707, sr)
+    lpL2.lowpass(c.lowpass, 0.707, sr); lpR2.lowpass(c.lowpass, 0.707, sr)
+    var acc = hold, heldL = 0.0, heldR = 0.0
+    for i in 0..<frames {
+      acc += 1
+      if acc >= hold {
+        acc -= hold
+        func crush(_ x: Double) -> Double {
+          let sat = tanh(drive * x) / norm
+          return (sat * steps).rounded() / steps
+        }
+        heldL = crush(Double(L[i] * pre))
+        heldR = crush(Double(R[i] * pre))
+      }
+      L[i] = Float(lpL2.run(lpL.run(heldL))) / pre
+      R[i] = Float(lpR2.run(lpR.run(heldR))) / pre
+    }
   }
 
   /// Drive into the acoustic kit's limiter. With voices punch-matched, 1.7 brings acoustic
@@ -243,8 +300,8 @@ enum AudioDSP {
   }
 
   /// The gain `renderPattern` would normalize this groove with (1 if it doesn't clip).
-  static func grooveGain(_ pattern: DrumPattern, bpm: Double, format: AVAudioFormat, acoustic: Bool) -> Float {
-    let b = renderPattern(pattern, bpm: bpm, loopBars: max(1, pattern.bars), format: format, acoustic: acoustic, fixedGain: 1)
+  static func grooveGain(_ pattern: DrumPattern, bpm: Double, format: AVAudioFormat, acoustic: Bool, analog: Bool = false, neon: Bool = false, sampler: SamplerCharacter? = nil) -> Float {
+    let b = renderPattern(pattern, bpm: bpm, loopBars: max(1, pattern.bars), format: format, acoustic: acoustic, analog: analog, neon: neon, sampler: sampler, fixedGain: 1)
     var peak: Float = 0
     for c in 0..<Int(b.format.channelCount) {
       let p = b.floatChannelData![c]
@@ -594,22 +651,11 @@ enum AudioDSP {
     }
   }
 
+  /// Perc is a soft shaker on every kit (it was a cowbell-like blip that stuck out).
   private static func perc(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float, pan: DrumPan) {
-    let v = Double(max(0.05, vel))
-    let n = Int(sr * (0.07 + 0.09 * v))
-    var phase = 0.0
-    let amp = 0.34 + 0.66 * v
-    let decay = 28 - 10 * v
-    for i in 0..<n {
-      let t = Double(i) / sr
-      let freq = 360 + 140 * v + (140 + 80 * v) * exp(-t * (32 + 8 * v))
-      let env = exp(-t * decay)
-      phase += (2 * Double.pi * freq) / sr
-      let noise = Double(white()) * exp(-t * (48 - 12 * v)) * (0.12 + 0.32 * v)
-      let s = Float((sin(phase) * env + noise) * amp * 0.48)
-      write(L, R, frames, at + i, s * pan.l, s * pan.r)
-    }
+    shaker(L, R, frames, sr, at, vel, pan: pan, bright: false)
   }
+
 
   private static func white() -> Float { Float.random(in: -1...1) }
 
@@ -1009,7 +1055,7 @@ struct DrumPan {
     r = Float(sin(a) * 2.0.squareRoot())
   }
 
-  private init(l: Float, r: Float) {
+  init(l: Float, r: Float) {
     self.l = l
     self.r = r
   }
@@ -1025,6 +1071,480 @@ struct DrumPan {
     case .tom:
       let pos = Float(((step % 16) + 16) % 16) / 15
       return DrumPan(0.3 - 0.65 * pos)
+    }
+  }
+}
+
+/// The drum kit a pattern is rendered with.
+enum DrumKit: String, CaseIterable, Identifiable {
+  /// Analog drum machine through a dark 12-bit, 26 kHz sampler: warm, hazy downtempo.
+  case dusty
+  /// The same machine pushed harder through a rougher 10-bit, 22 kHz sampler: gritty
+  /// and bright for fast, chopped braindance.
+  case crunch
+  /// Big mid-80s drum machine: punchy kick, snare and clap in a huge gated reverb,
+  /// swooping electronic toms, through a cleaner 12-bit sampler.
+  case neon
+  /// Recorded one-shots (VCSL, CC0).
+  case acoustic
+  var id: String { rawValue }
+  var label: String {
+    switch self {
+    case .dusty: return "Dusty"
+    case .crunch: return "Crunch"
+    case .neon: return "Neon"
+    case .acoustic: return "Acoustic"
+    }
+  }
+  /// Voiced by the analog machine (Dusty, Crunch).
+  var analog: Bool { self == .dusty || self == .crunch }
+  /// The classic-sampler character this kit renders through (nil for acoustic).
+  var sampler: SamplerCharacter? {
+    switch self {
+    case .dusty: return .dusty
+    case .crunch: return .crunch
+    case .neon: return .neon
+    case .acoustic: return nil
+    }
+  }
+}
+
+/// Vintage sampler emulation: the machine sampled through old gear. Saturation, then
+/// sample-rate reduction (zero-order hold, no anti-alias: the classic grit), bit
+/// reduction, then a reconstruction low-pass.
+struct SamplerCharacter {
+  var drive: Double
+  var rate: Double
+  var bits: Int
+  var lowpass: Double
+  /// Output level after normalising.
+  var level: Float
+
+  // Levels put both at the old default kit's loudness (1.4 dB over Acoustic), so the
+  // drums/keys balance set by ear is unchanged.
+  static let dusty = SamplerCharacter(drive: 1.6, rate: 26_040, bits: 12, lowpass: 9_000, level: 0.45)
+  static let crunch = SamplerCharacter(drive: 2.6, rate: 22_050, bits: 10, lowpass: 13_000, level: 0.38)
+  /// Cleaner and brighter: the 12-bit, ~30 kHz machines of the mid-80s.
+  static let neon = SamplerCharacter(drive: 1.2, rate: 30_000, bits: 12, lowpass: 13_500, level: 0.77)
+}
+
+extension AudioDSP {
+  /// Analog drum machine voices, modelled on the classic circuits:
+  /// - kick: struck resonator (a decaying sine) with a fast pitch drop, a click, soft saturation
+  /// - snare: two tuned resonators for the body plus high-passed noise for the snare wires
+  /// - clap: four noise bursts ~9 ms apart through a band-pass, then a short tail
+  /// - hats: six detuned square oscillators through band-pass and high-pass filters
+  /// - rim: two short high resonators; tom: pitch falls across the bar (high -> floor)
+  /// - perc: the two-oscillator cowbell
+  /// Oscillators are band-limited (PolyBLEP). `step` sets the tom's pitch.
+  static func renderAnalog(
+    _ voice: DrumVoice, _ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>,
+    _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float, step: Int, pan: DrumPan
+  ) {
+    var rng = DrumRng(seed: UInt64(truncatingIfNeeded: at) &* 0x9E37_79B9 &+ UInt64(voice.rawValue.count) &* 0xBF58_476D)
+    let v = Double(max(0.05, min(1, vel)))
+    // Per-voice level so the kit's balance matches the acoustic kit's (each voice's punch
+    // relative to its kick, at vel 0.8/1.0).
+    let trimDB: Double
+    switch voice {
+    case .kick: trimDB = -2.5
+    case .snare: trimDB = -3.8
+    case .hat: trimDB = 0.3
+    case .ohat: trimDB = 1.8
+    case .clap: trimDB = 4.2
+    case .rim: trimDB = -4.4
+    case .tom: trimDB = -6.0
+    case .perc: trimDB = 8.2
+    }
+    let trim = pow(10, trimDB / 20)
+    func put(_ i: Int, _ s: Double) {
+      let j = at + i
+      guard j >= 0, j < frames else { return }
+      L[j] += Float(s * trim) * pan.l
+      R[j] += Float(s * trim) * pan.r
+    }
+    func square(_ phase: Double, _ inc: Double) -> Double {
+      let t = phase - floor(phase)
+      var s = t < 0.5 ? 1.0 : -1.0
+      s += blep(t, inc)
+      s -= blep((t + 0.5).truncatingRemainder(dividingBy: 1), inc)
+      return s
+    }
+    switch voice {
+    case .kick:
+      // Deep body with a punchy sweep from ~150 Hz, a short noise click, and saturation
+      // so it has weight rather than a clean sine "boop".
+      let decay = 0.3 + 0.38 * v
+      let n = Int(sr * min(1.8, decay * 5))
+      var ph = 0.0
+      var lp = 0.0
+      let amp = 0.6 + 0.4 * v
+      for i in 0..<n {
+        let t = Double(i) / sr
+        let f = 46 * (1 + 2.2 * exp(-t / 0.018) + 0.4 * exp(-t / 0.08))
+        ph += 2 * .pi * f / sr
+        let body = sin(ph) * exp(-t / decay) * (1 + 0.25 * exp(-t / 0.04))
+        lp += 0.35 * (rng.bipolar() - lp)
+        let click = lp * exp(-t / 0.0025) * 0.5 * v
+        put(i, tanh(2.2 * (body * 0.85 + click)) / tanh(2.2) * amp)
+      }
+    case .snare:
+      // Body at ~185/330 Hz with a pitch drop, and snare wires as band-limited noise
+      // (1-9 kHz) with a longer tail: a crack with weight, not a thin tick.
+      let n = Int(sr * 0.45)
+      var hp1 = Biquad2(), hp2 = Biquad2(), lp1 = Biquad2()
+      hp1.highpass(1000, 0.707, sr); hp2.highpass(1000, 0.707, sr); lp1.lowpass(9000, 0.707, sr)
+      let noiseDecay = 0.12 + 0.07 * v
+      let amp = 0.5 + 0.5 * v
+      var ph1 = 0.0, ph2 = 0.0
+      for i in 0..<n {
+        let t = Double(i) / sr
+        let drop = 1 + 0.18 * exp(-t / 0.012)
+        ph1 += 2 * .pi * 185 * drop / sr
+        ph2 += 2 * .pi * 330 * drop / sr
+        let tone = (0.6 * sin(ph1) + 0.35 * sin(ph2)) * exp(-t / 0.07)
+        let noise = lp1.run(hp2.run(hp1.run(rng.bipolar()))) * exp(-t / noiseDecay)
+        put(i, tanh(1.4 * (tone * 0.7 + noise * 0.95)) / tanh(1.4) * amp)
+      }
+    case .clap:
+      let n = Int(sr * 0.42)
+      var bp = Biquad2()
+      bp.bandpass(1150, 1.1, sr)
+      let bursts = [0.0, 0.009, 0.018, 0.027]
+      let amp = 0.5 + 0.5 * v
+      for i in 0..<n {
+        let t = Double(i) / sr
+        var env = 0.0
+        for b in bursts where t >= b { env = max(env, exp(-(t - b) / 0.0042)) }
+        if t >= bursts[3] { env = max(env, 0.55 * exp(-(t - bursts[3]) / 0.11)) }
+        put(i, bp.run(rng.bipolar()) * env * amp * 1.6)
+      }
+    case .hat, .ohat:
+      let open = voice == .ohat
+      let decay = open ? 0.22 + 0.16 * v : 0.032 + 0.022 * v
+      let n = Int(sr * min(1.2, decay * 6))
+      let freqs = [205.3, 304.4, 369.6, 522.7, 540.0, 800.0]
+      var phases = freqs.map { _ in rng.unit() }
+      var bp = Biquad2(), hp = Biquad2()
+      bp.bandpass(7100, 1.4, sr); hp.highpass(6200, 0.707, sr)
+      let amp = (0.35 + 0.65 * v) * (open ? 0.9 : 0.8)
+      for i in 0..<n {
+        let t = Double(i) / sr
+        var metal = 0.0
+        for k in 0..<freqs.count {
+          let inc = freqs[k] / sr
+          metal += square(phases[k], inc)
+          phases[k] += inc
+          if phases[k] >= 1 { phases[k] -= 1 }
+        }
+        // Half metallic oscillators, half noise: dusty rather than a pure "toy" ring.
+        let s = hp.run(bp.run(metal / 6 * 0.55 + rng.bipolar() * 0.45)) * exp(-t / decay)
+        put(i, s * amp * 2.2)
+      }
+    case .rim:
+      let n = Int(sr * 0.05)
+      let amp = 0.45 + 0.55 * v
+      for i in 0..<n {
+        let t = Double(i) / sr
+        let s = 0.6 * sin(2 * .pi * 455 * t) * exp(-t / 0.008) + 0.5 * sin(2 * .pi * 1667 * t) * exp(-t / 0.005)
+        put(i, s * amp)
+      }
+    case .tom:
+      // High tom early in the bar, floor tom at the end (matches the pan sweep).
+      let pos = Double(((step % 16) + 16) % 16) / 15
+      let f0 = 190 * pow(0.5, pos)
+      let decay = 0.16 + 0.12 * v + 0.08 * pos
+      let n = Int(sr * min(1.2, decay * 5))
+      var ph = 0.0
+      let amp = 0.5 + 0.5 * v
+      for i in 0..<n {
+        let t = Double(i) / sr
+        ph += 2 * .pi * f0 * (1 + 0.3 * exp(-t / 0.02)) / sr
+        let s = sin(ph) * exp(-t / decay) + rng.bipolar() * 0.05 * exp(-t / 0.02)
+        put(i, s * amp)
+      }
+    case .perc:
+      // Machine maracas (the kit's perc is a shaker, not a cowbell).
+      shaker(L, R, frames, sr, at, Float(v), pan: DrumPan(l: pan.l * Float(trim), r: pan.r * Float(trim)), bright: true)
+    }
+  }
+
+  /// Shaker: high-passed noise with a quick grain attack, a second smaller grain and a
+  /// short decay. `bright` is the analog kit's tighter, brighter machine maracas.
+  static func shaker(
+    _ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double,
+    _ at: Int, _ vel: Float, pan: DrumPan, bright: Bool
+  ) {
+    let v = Double(max(0.05, min(1, vel)))
+    var rng = DrumRng(seed: UInt64(truncatingIfNeeded: at) &* 0xD1B5_4A32 &+ (bright ? 7 : 3))
+    var hp1 = Biquad2(), hp2 = Biquad2()
+    let fc = bright ? 7000.0 : 4500.0
+    hp1.highpass(fc, 0.707, sr); hp2.highpass(fc, 0.707, sr)
+    let decay = (bright ? 0.018 : 0.03) * (0.8 + 0.4 * v)
+    let n = Int(sr * decay * 6)
+    // Sits ~2 dB under the closed hats: texture, not a lead voice (noise carries far more
+    // energy than the hats' short hits, so this is well down from unity).
+    let amp = (0.25 + 0.55 * v) * (bright ? 0.9 : 0.75) * 0.085
+    for i in 0..<n {
+      let t = Double(i) / sr
+      let grain1 = min(1, t / 0.0025) * exp(-t / decay)
+      let grain2 = t > 0.012 ? 0.4 * exp(-(t - 0.012) / decay) : 0
+      let s = hp2.run(hp1.run(rng.bipolar())) * (grain1 + grain2) * amp
+      let j = at + i
+      guard j >= 0, j < frames else { continue }
+      L[j] += Float(s) * pan.l
+      R[j] += Float(s) * pan.r
+    }
+  }
+
+  /// PolyBLEP step correction for band-limited square edges.
+  fileprivate static func blep(_ t: Double, _ dt: Double) -> Double {
+    if t < dt { let x = t / dt; return x + x - x * x - 1 }
+    if t > 1 - dt { let x = (t - 1) / dt; return x * x + x + x + 1 }
+    return 0
+  }
+
+  /// Small RBJ biquad (Double precision) for offline voice rendering.
+  fileprivate struct Biquad2 {
+    var b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0, z1 = 0.0, z2 = 0.0
+    mutating func run(_ x: Double) -> Double {
+      let y = b0 * x + z1
+      z1 = b1 * x - a1 * y + z2
+      z2 = b2 * x - a2 * y
+      return y
+    }
+    mutating func bandpass(_ f: Double, _ q: Double, _ sr: Double) {
+      let w = 2 * .pi * f / sr, al = sin(w) / (2 * q), a0 = 1 + al
+      b0 = al / a0; b1 = 0; b2 = -al / a0; a1 = -2 * cos(w) / a0; a2 = (1 - al) / a0
+    }
+    mutating func lowpass(_ f: Double, _ q: Double, _ sr: Double) {
+      let w = 2 * .pi * min(f, sr * 0.45) / sr, al = sin(w) / (2 * q), c = cos(w), a0 = 1 + al
+      b0 = (1 - c) / 2 / a0; b1 = (1 - c) / a0; b2 = (1 - c) / 2 / a0; a1 = -2 * c / a0; a2 = (1 - al) / a0
+    }
+    mutating func highpass(_ f: Double, _ q: Double, _ sr: Double) {
+      let w = 2 * .pi * f / sr, al = sin(w) / (2 * q), c = cos(w), a0 = 1 + al
+      b0 = (1 + c) / 2 / a0; b1 = -(1 + c) / a0; b2 = (1 + c) / 2 / a0; a1 = -2 * c / a0; a2 = (1 - al) / a0
+    }
+  }
+}
+
+// MARK: - Neon kit (big mid-80s machine)
+
+extension AudioDSP {
+  /// One Neon hit into the dry mix, plus its share into the gated-reverb send (mono).
+  static func renderNeon(
+    _ voice: DrumVoice, _ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>,
+    _ send: UnsafeMutablePointer<Float>, _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float,
+    step: Int, pan: DrumPan
+  ) {
+    var rng = DrumRng(seed: UInt64(truncatingIfNeeded: at) &* 0x2545_F491 &+ UInt64(voice.rawValue.count) &* 0x9E37_79B9)
+    let v = Double(max(0.05, min(1, vel)))
+    // Per-voice level (balanced against the acoustic kit) and reverb send.
+    let trimDB: Double, sendAmt: Double
+    switch voice {
+    // The acoustic kit's balance, except the snare (+2 dB), clap and toms (+1 dB) are
+    // pushed forward on purpose: the oversized snare is the sound.
+    case .kick: trimDB = 0; sendAmt = 0
+    case .snare: trimDB = 0.5; sendAmt = 1
+    case .hat: trimDB = 3.3; sendAmt = 0
+    case .ohat: trimDB = 5.9; sendAmt = 0
+    case .clap: trimDB = 4.5; sendAmt = 0.9
+    case .rim: trimDB = -2.0; sendAmt = 0.25
+    case .tom: trimDB = -4.6; sendAmt = 0.6
+    case .perc: trimDB = 9.3; sendAmt = 0
+    }
+    let trim = pow(10, trimDB / 20)
+    func put(_ i: Int, _ s: Double) {
+      let j = at + i
+      guard j >= 0, j < frames else { return }
+      let x = s * trim
+      L[j] += Float(x) * pan.l
+      R[j] += Float(x) * pan.r
+      if sendAmt > 0 { send[j] += Float(x * sendAmt) }
+    }
+    switch voice {
+    case .kick:
+      // Tight and punchy: a fast sweep from ~180 Hz onto a short body, and a hard beater click.
+      let decay = 0.2 + 0.12 * v
+      let n = Int(sr * min(1.2, decay * 5))
+      var ph = 0.0
+      var hp = Biquad2()
+      hp.highpass(2500, 0.707, sr)
+      let amp = 0.6 + 0.4 * v
+      for i in 0..<n {
+        let t = Double(i) / sr
+        let f = 52 * (1 + 2.5 * exp(-t / 0.011) + 0.35 * exp(-t / 0.05))
+        ph += 2 * .pi * f / sr
+        let body = sin(ph) * exp(-t / decay)
+        let click = (hp.run(rng.bipolar()) * 0.6 + sin(2 * .pi * 1500 * t) * 0.5) * exp(-t / 0.003) * v
+        put(i, tanh(2.6 * (body * 0.9 + click * 0.45)) / tanh(2.6) * amp)
+      }
+    case .snare:
+      // Crisp and bright: a short tuned body under wide, hissy wires. Most of its size
+      // comes from the gated reverb.
+      let n = Int(sr * 0.35)
+      var hp1 = Biquad2(), hp2 = Biquad2(), lp = Biquad2()
+      hp1.highpass(1500, 0.707, sr); hp2.highpass(1500, 0.707, sr); lp.lowpass(11_000, 0.707, sr)
+      let noiseDecay = 0.1 + 0.06 * v
+      let amp = 0.5 + 0.5 * v
+      var ph1 = 0.0, ph2 = 0.0
+      for i in 0..<n {
+        let t = Double(i) / sr
+        let drop = 1 + 0.25 * exp(-t / 0.01)
+        ph1 += 2 * .pi * 200 * drop / sr
+        ph2 += 2 * .pi * 360 * drop / sr
+        let tone = (0.6 * sin(ph1) + 0.4 * sin(ph2)) * exp(-t / 0.05)
+        let noise = lp.run(hp2.run(hp1.run(rng.bipolar()))) * exp(-t / noiseDecay)
+        put(i, tanh(1.6 * (tone * 0.6 + noise * 1.1)) / tanh(1.6) * amp)
+      }
+    case .clap:
+      // A stack of four hands, a wider band than the analog clap, and a short tail.
+      let n = Int(sr * 0.35)
+      var bp1 = Biquad2(), bp2 = Biquad2()
+      bp1.bandpass(1300, 0.9, sr); bp2.bandpass(2600, 1.2, sr)
+      let bursts = [0.0, 0.011, 0.021, 0.033]
+      let amp = 0.5 + 0.5 * v
+      for i in 0..<n {
+        let t = Double(i) / sr
+        var env = 0.0
+        for b in bursts where t >= b { env = max(env, exp(-(t - b) / 0.005)) }
+        if t >= bursts[3] { env = max(env, 0.5 * exp(-(t - bursts[3]) / 0.09)) }
+        let x = rng.bipolar()
+        put(i, (bp1.run(x) + 0.6 * bp2.run(x)) * env * amp * 1.5)
+      }
+    case .hat, .ohat:
+      // Bright and tight, mostly metal.
+      let open = voice == .ohat
+      let decay = open ? 0.24 + 0.12 * v : 0.026 + 0.016 * v
+      let n = Int(sr * min(1.2, decay * 6))
+      let freqs = [263.0, 400.0, 421.0, 474.0, 587.0, 845.0]
+      var phases = freqs.map { _ in rng.unit() }
+      var bp = Biquad2(), hp = Biquad2()
+      bp.bandpass(9000, 1.1, sr); hp.highpass(7500, 0.707, sr)
+      let amp = (0.35 + 0.65 * v) * (open ? 0.85 : 0.8)
+      for i in 0..<n {
+        let t = Double(i) / sr
+        var metal = 0.0
+        for k in 0..<freqs.count {
+          let inc = freqs[k] / sr
+          let p = phases[k]
+          metal += (p < 0.5 ? 1 : -1) + blep(p, inc) - blep((p + 0.5).truncatingRemainder(dividingBy: 1), inc)
+          phases[k] = p + inc >= 1 ? p + inc - 1 : p + inc
+        }
+        let s = hp.run(bp.run(metal / 6 * 0.75 + rng.bipolar() * 0.25)) * exp(-t / decay)
+        put(i, s * amp * 2.4)
+      }
+    case .rim:
+      let n = Int(sr * 0.06)
+      let amp = 0.45 + 0.55 * v
+      for i in 0..<n {
+        let t = Double(i) / sr
+        let s = 0.5 * sin(2 * .pi * 520 * t) * exp(-t / 0.01) + 0.55 * sin(2 * .pi * 1800 * t) * exp(-t / 0.006)
+          + rng.bipolar() * 0.25 * exp(-t / 0.002)
+        put(i, s * amp)
+      }
+    case .tom:
+      // Electronic tom: a big downward pitch swoop, a noisy stick attack. High early in the
+      // bar, low at the end (matches the pan sweep).
+      let pos = Double(((step % 16) + 16) % 16) / 15
+      let f0 = 230 * pow(0.5, pos * 1.2)
+      let decay = 0.26 + 0.14 * v + 0.08 * pos
+      let n = Int(sr * min(1.5, decay * 5))
+      var ph = 0.0
+      var lp = Biquad2()
+      lp.lowpass(3000, 0.707, sr)
+      let amp = 0.5 + 0.5 * v
+      for i in 0..<n {
+        let t = Double(i) / sr
+        ph += 2 * .pi * f0 * (1 + 0.9 * exp(-t / 0.08)) / sr
+        let tri = 2 * abs(2 * (ph / (2 * .pi) - floor(ph / (2 * .pi) + 0.5))) - 1
+        let tone = (0.75 * sin(ph) + 0.25 * tri) * exp(-t / decay)
+        let stick = lp.run(rng.bipolar()) * 0.5 * exp(-t / 0.012)
+        put(i, tanh(1.5 * (tone + stick)) / tanh(1.5) * amp)
+      }
+    case .perc:
+      shaker(L, R, frames, sr, at, Float(v), pan: DrumPan(l: pan.l * Float(trim), r: pan.r * Float(trim)), bright: true)
+    }
+  }
+
+  /// The big gated reverb: a bright, dense room (four-line feedback delay network, ~1.6 s)
+  /// opened by each snare, clap and tom, held for about a quarter note, then shut hard.
+  /// The loop repeats, so a gate running past the end carries on at the start, and the
+  /// reverb is warmed up on the loop's last stretch first.
+  static func addGatedReverb(
+    _ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>,
+    send: [Float], gateAt: [Int], frames: Int, sr: Double, bpm: Double
+  ) {
+    guard frames > 1, !gateAt.isEmpty else { return }
+    let hold = Int(sr * min(0.3, 60 / bpm * 0.55))
+    let close = Int(sr * 0.03)
+    let open = Int(sr * 0.002)
+    var gate = [Float](repeating: 0, count: frames)
+    for a in gateAt {
+      for k in 0..<(hold + close) {
+        let g: Float = k < open ? Float(k) / Float(open)
+          : k < hold ? 1 : 1 - Float(k - hold) / Float(close)
+        let j = ((a + k) % frames + frames) % frames
+        if g > gate[j] { gate[j] = g }
+      }
+    }
+    var verb = GatedRoom(sr: sr)
+    let warm = min(frames, Int(sr * 1.5))
+    for i in (frames - warm)..<frames { _ = verb.run(Double(send[i])) }
+    let wet = 0.85
+    for i in 0..<frames {
+      let (l, r) = verb.run(Double(send[i]))
+      let g = Double(gate[i]) * wet
+      L[i] += Float(l * g)
+      R[i] += Float(r * g)
+    }
+  }
+
+  /// Dense, bright room: 10 ms pre-delay, two diffusers, four damped delay lines mixed by
+  /// a Hadamard matrix, stereo taps.
+  private struct GatedRoom {
+    var pre: [Double], preIdx = 0
+    var ap: [[Double]], apIdx = [0, 0]
+    let apG = 0.7
+    var lines: [[Double]], idx = [0, 0, 0, 0]
+    var fbGain: [Double]
+    var damp = [0.0, 0.0, 0.0, 0.0]
+    let dampK: Double
+
+    init(sr: Double) {
+      pre = [Double](repeating: 0, count: max(1, Int(sr * 0.01)))
+      ap = [4.7, 1.7].map { [Double](repeating: 0, count: max(1, Int(sr * $0 / 1000))) }
+      let ms = [29.7, 37.1, 41.1, 43.7]
+      lines = ms.map { [Double](repeating: 0, count: max(1, Int(sr * $0 / 1000))) }
+      let rt60 = 1.6
+      fbGain = ms.map { pow(10, -3 * ($0 / 1000) / rt60) }
+      dampK = 1 - exp(-2 * .pi * 8000 / sr)
+    }
+
+    mutating func run(_ x: Double) -> (Double, Double) {
+      var s = pre[preIdx]
+      pre[preIdx] = x
+      preIdx = (preIdx + 1) % pre.count
+      for k in 0..<2 {
+        let d = ap[k][apIdx[k]]
+        let y = -apG * s + d
+        ap[k][apIdx[k]] = s + apG * y
+        apIdx[k] = (apIdx[k] + 1) % ap[k].count
+        s = y
+      }
+      var o = [0.0, 0.0, 0.0, 0.0]
+      for k in 0..<4 {
+        damp[k] += dampK * (lines[k][idx[k]] - damp[k])
+        o[k] = damp[k]
+      }
+      let h0 = o[0] + o[1] + o[2] + o[3], h1 = o[0] - o[1] + o[2] - o[3]
+      let h2 = o[0] + o[1] - o[2] - o[3], h3 = o[0] - o[1] - o[2] + o[3]
+      let mixed = [h0, h1, h2, h3]
+      for k in 0..<4 {
+        lines[k][idx[k]] = s + 0.5 * mixed[k] * fbGain[k]
+        idx[k] = (idx[k] + 1) % lines[k].count
+      }
+      return ((o[0] + o[2]) * 0.7, (o[1] + o[3]) * 0.7)
     }
   }
 }

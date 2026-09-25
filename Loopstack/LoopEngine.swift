@@ -4,7 +4,7 @@ import Foundation
 import UIKit
 
 enum TransportStatus: String {
-  case idle, playing, countin, armed, recording
+  case idle, playing, countin, recording
 }
 
 enum MicState: String {
@@ -43,6 +43,10 @@ struct InstrumentPatch: Codable, Equatable {
   var release: Float?
   /// Tape amount 0...1; nil (older saved sounds) means off.
   var tape: Float?
+  /// Tape wear 0...1; nil means pristine.
+  var wear: Float?
+  /// FM amount 0...1 for FM oscillators; nil (older saved sounds) means the middle, 0.5.
+  var fm: Float?
 
   /// Slider -> envelope time constant, log curve centred on 0.09 s: the fixed release
   /// this replaced sits exactly at the middle (0.5). Range ~7 ms ... 1.16 s.
@@ -78,20 +82,21 @@ struct InstrumentPatch: Codable, Equatable {
       patch.reverb = 0.32
       patch.drift = 0.18
     case .bass:
-      // Saw filtered close to the note (cut 0.10 is ~135 Hz): round like a triangle
-      // bass, but with a little upper content so it doesn't vanish on phone speakers
-      // the way a pure sine did. A higher cutoff (0.5) read as a lead.
-      patch.wave = .saw
+      // Two-operator FM bass: a snap of harmonics on the attack that settles into a
+      // round tone whose energy sits in the low mids, so it's heard on a phone speaker
+      // (which can't play the fundamental) without the top end of a lead. A sine an
+      // octave down carries the weight on headphones and speakers.
+      patch.wave = .fm
       patch.wave2 = .sine
-      patch.oscMix = 0.32
-      patch.oscDetune = 0.06
+      patch.oscMix = 0.3
+      patch.oscDetune = 0.04
       patch.osc2Octave = -1
-      patch.cutoff = 0.10
-      patch.resonance = 0.24
+      patch.cutoff = 0.4
+      patch.resonance = 0.08
       patch.gain = 0.86
       patch.delay = 0.04
-      patch.reverb = 0.06
-      patch.drift = 0.1
+      patch.reverb = 0.1
+      patch.drift = 0.14
     case .pluck:
       patch.wave = .triangle
       patch.wave2 = .pulse
@@ -149,6 +154,8 @@ struct Layer: Identifiable {
   var reversed: Bool
   var slot: LayerSlot
   var drive: Float = 0
+  var soloed = false
+  var halfSpeed = false
 }
 
 @MainActor
@@ -162,7 +169,8 @@ final class LoopEngine: ObservableObject {
   @Published var monitorOn = false
   @Published var drumsOn = false
   @Published var jamMode = false
-  @Published var acousticKit = false
+  @Published var drumKit: DrumKit = .dusty
+  var acousticKit: Bool { drumKit == .acoustic }
   @Published var fillArmed = false
   @Published var drumId = "floor"
   @Published var masterGain: Float = 0.85
@@ -179,6 +187,9 @@ final class LoopEngine: ObservableObject {
   @Published var instrumentRing: Float = 0
   @Published var instrumentRelease: Float = InstrumentPatch.defaultRelease(for: .keys)
   @Published var instrumentTape: Float = 0
+  @Published var instrumentWear: Float = 0
+  /// FM amount: how bright an FM oscillator is. 0.5 is the voiced default.
+  @Published var instrumentFM: Float = 0.5
   @Published var instrumentWave: OscWave = .warm
   @Published var instrumentWave2: OscWave = .square
   @Published var oscMix: Float = 0.2
@@ -204,6 +215,10 @@ final class LoopEngine: ObservableObject {
   @Published var preset: InstrumentPreset = .keys
   @Published var audioRunning = false
   @Published var sessionRecording = false
+  /// The take in progress: where in the loop it began (0..<1, -1 before it starts) and
+  /// how much of the loop it has captured (0...1).
+  @Published var takeStart: Double = -1
+  @Published var takeDone: Double = 0
   @Published var sessionReady = false
   @Published var sessionURL: URL?
   @Published var sessionDuration: Double = 0
@@ -225,7 +240,21 @@ final class LoopEngine: ObservableObject {
   /// cut a note another held chord still needs.
   private var soundingCount: [Int: Int] = [:]
   @Published var arpDivision = 4
-  @Published var arpMode = 0 // 0 up, 1 down, 2 ping
+  @Published var arpMode = 0 // 0 up, 1 down, 2 ping, 3 as played, 4 random
+  /// How many octaves the pattern climbs through (1...4).
+  @Published var arpOctaves = 1
+  /// Latch: tapping a pad adds it to the pattern (tap again to take it out), so a
+  /// pattern can be longer than the fingers you can hold down.
+  @Published var arpLatch = false
+  /// Pads in the latched pattern, in the order they were tapped.
+  @Published var latchedPads: [Int] = []
+  /// Held pads in the order they were pressed (for "as played" without latch).
+  private var heldOrder: [Int] = []
+  /// Pads under a finger in latch mode: the pad's touch reports again as it moves, so
+  /// each touch toggles the pad once.
+  private var latchTouches: Set<Int> = []
+  /// Seed for the random order, so it repeats like a pattern until Rand is tapped again.
+  private var arpSeed: UInt64 = 1
   @Published var privacyOpen = false
   @Published var scaleRoot: Int = UserDefaults.standard.object(forKey: "scaleRoot") as? Int ?? 0
   @Published var scaleMode: ScaleMode = ScaleMode(rawValue: UserDefaults.standard.string(forKey: "scaleMode") ?? "") ?? .major
@@ -319,6 +348,7 @@ final class LoopEngine: ObservableObject {
   private let silentPlayer = AVAudioPlayerNode()
   private let captureState = CaptureState()
   private let liveSynth = LiveSynth()
+  private let liveArp = LiveArp()
   private let tapeSim = TapeSim()
   private var synthNode: AVAudioSourceNode?
   /// One timeline for drums and loops.
@@ -567,7 +597,7 @@ final class LoopEngine: ObservableObject {
 
     liveSynth.sampleRate = format.sampleRate
     liveLayers.setClock(start: 0, dur: loopDuration, sampleRate: format.sampleRate)
-    let node = AudioGraph.synthNode(format: format, synth: liveSynth, sampler: liveSampler, tape: tapeSim, outRate: format.sampleRate)
+    let node = AudioGraph.synthNode(format: format, synth: liveSynth, sampler: liveSampler, tape: tapeSim, arp: liveArp, clock: transportClock, outRate: format.sampleRate)
     engine.attach(node)
     engine.connect(node, to: instMixer, format: format)
     synthNode = node
@@ -659,8 +689,14 @@ final class LoopEngine: ObservableObject {
   func setInstrumentPan(_ v: Float) { instrumentPan = v; rememberPatch(); applyGains() }
   func setInstrumentDelay(_ v: Float) { instrumentDelay = v; rememberPatch(); applyInstrumentSpace() }
   func setInstrumentReverb(_ v: Float) { instrumentReverb = v; rememberPatch(); applyInstrumentSpace() }
-  func setInstrumentDrift(_ v: Float) { instrumentDrift = v; rememberPatch() }
-  func setInstrumentRing(_ v: Float) { instrumentRing = v; rememberPatch() }
+  func setInstrumentDrift(_ v: Float) { instrumentDrift = v; rememberPatch(); liveSynth.drift = v }
+  func setInstrumentRing(_ v: Float) { instrumentRing = v; rememberPatch(); liveSynth.ring = v }
+  func setInstrumentFM(_ v: Float) { instrumentFM = v; rememberPatch(); liveSynth.fmAmount = v }
+  func setInstrumentWear(_ v: Float) {
+    instrumentWear = v
+    rememberPatch()
+    tapeSim.set(wear: v)
+  }
   func setInstrumentTape(_ v: Float) {
     instrumentTape = v
     rememberPatch()
@@ -671,8 +707,8 @@ final class LoopEngine: ObservableObject {
     rememberPatch()
     liveSynth.release = InstrumentPatch.releaseTau(v)
   }
-  func setInstrumentGlitch(_ v: Float) { instrumentGlitch = v; rememberPatch() }
-  func setInstrumentTune(_ hz: Double) { instrumentTune = min(452, max(428, hz)); rememberPatch() }
+  func setInstrumentGlitch(_ v: Float) { instrumentGlitch = v; rememberPatch(); liveSynth.glitch = v }
+  func setInstrumentTune(_ hz: Double) { instrumentTune = min(452, max(428, hz)); rememberPatch(); liveSynth.a4 = instrumentTune }
   func setInstrumentOctave(_ n: Int) { instrumentOctave = min(3, max(-3, n)); rememberPatch() }
 
   func setMasterGain(_ v: Float) { masterGain = v; applyGains() }
@@ -695,18 +731,14 @@ final class LoopEngine: ObservableObject {
     jamMode = on
     if running { rescheduleDrums() }
   }
-  func setAcousticKit(_ on: Bool) {
-    acousticKit = on
-    if on {
-      if AcousticKit.isLoaded {
-        if drumsOn, running { rescheduleDrums() }
-      } else {
-        Task.detached(priority: .userInitiated) {
-          AcousticKit.load()
-          await MainActor.run {
-            guard self.acousticKit else { return }
-            if self.drumsOn, self.running { self.rescheduleDrums() }
-          }
+  func setDrumKit(_ kit: DrumKit) {
+    drumKit = kit
+    if kit == .acoustic, !AcousticKit.isLoaded {
+      Task.detached(priority: .userInitiated) {
+        AcousticKit.load()
+        await MainActor.run {
+          guard self.drumKit == .acoustic else { return }
+          if self.drumsOn, self.running { self.rescheduleDrums() }
         }
       }
     } else if drumsOn, running {
@@ -755,6 +787,8 @@ final class LoopEngine: ObservableObject {
     let patch = patches[p] ?? InstrumentPatch.default(for: p)
     instrumentRelease = patch.release ?? InstrumentPatch.defaultRelease(for: p)
     instrumentTape = patch.tape ?? 0
+    instrumentWear = patch.wear ?? 0
+    instrumentFM = patch.fm ?? 0.5
     instrumentGain = patch.gain
     instrumentPan = patch.pan
     instrumentDelay = patch.delay
@@ -812,7 +846,9 @@ final class LoopEngine: ObservableObject {
       cutoff: cutoff,
       resonance: resonance,
       release: instrumentRelease,
-      tape: instrumentTape
+      tape: instrumentTape,
+      wear: instrumentWear,
+      fm: instrumentFM
     )
   }
 
@@ -830,7 +866,9 @@ final class LoopEngine: ObservableObject {
     liveSynth.ring = instrumentRing
     liveSynth.release = InstrumentPatch.releaseTau(instrumentRelease)
     tapeSim.set(amount: instrumentTape, sampleRate: format.sampleRate)
+    tapeSim.set(wear: instrumentWear)
     liveSynth.glitch = instrumentGlitch
+    liveSynth.fmAmount = instrumentFM
   }
   func setInputMode(_ mode: String) {
     inputMode = mode
@@ -894,6 +932,8 @@ final class LoopEngine: ObservableObject {
     }
     instrumentRelease = patch.release ?? InstrumentPatch.defaultRelease(for: preset)
     instrumentTape = patch.tape ?? 0
+    instrumentWear = patch.wear ?? 0
+    instrumentFM = patch.fm ?? 0.5
     instrumentGain = patch.gain
     instrumentPan = patch.pan
     instrumentDelay = patch.delay
@@ -1034,6 +1074,8 @@ final class LoopEngine: ObservableObject {
       captureSlot = nil
     }
     capturing = false
+    takeStart = -1
+    takeDone = 0
     status = .idle
     position = 0
     resumePosition = 0
@@ -1043,12 +1085,12 @@ final class LoopEngine: ObservableObject {
     applyGains()
   }
 
+  /// Record captures exactly one full loop from wherever it's pressed: it wraps round
+  /// the cycle and closes where it began. A second press doesn't cut the take short
+  /// (Stop discards it).
   func record() {
     ensureRunning()
-    if status == .recording {
-      finishCapture(force: true)
-      return
-    }
+    if status == .recording { return }
     if status == .idle {
       if countInOn {
         status = .countin
@@ -1066,18 +1108,11 @@ final class LoopEngine: ObservableObject {
       return
     }
     if status == .playing {
-      status = .armed
+      startCapture()
+      guard capturing else { return }  // all loop slots are full
+      status = .recording
       applyGains()
       rescheduleMetro()
-      let pos = (CACurrentMediaTime() - cycleStart).truncatingRemainder(dividingBy: max(loopDuration, 0.05))
-      let frac = pos / max(loopDuration, 0.05)
-      if frac < 0.08 || frac > 0.96 {
-        startCapture()
-        status = .recording
-        applyGains()
-        rescheduleMetro()
-      }
-      return
     }
   }
 
@@ -1097,17 +1132,40 @@ final class LoopEngine: ObservableObject {
 
   func pressNote(_ midi: Int, velocity: Float = 0.85) {
     guard !heldNotes.contains(midi) else { return }
-    heldNotes.insert(midi)
     let notes = chordMode
       ? MusicKey.chord(on: midi, root: scaleRoot, mode: scaleMode, sevenths: chordSevenths)
       : [midi]
+    if arpOn && arpLatch {
+      // Toggle the pad in the latched pattern, once per touch.
+      guard latchTouches.insert(midi).inserted else { return }
+      if let i = latchedPads.firstIndex(of: midi) {
+        latchedPads.remove(at: i)
+        chordFor[midi] = nil
+        pushArp()
+        return
+      }
+      latchedPads.append(midi)
+      chordFor[midi] = notes
+      if latchedPads.count == 1 {
+        arpOrigin = CACurrentMediaTime()
+        lastArpStep = -1
+      }
+      ensureRunning()
+      syncSynth()
+      pushArp(retrigger: latchedPads.count == 1)
+      return
+    }
+    heldNotes.insert(midi)
+    heldOrder.append(midi)
     chordFor[midi] = notes
     if arpOn {
       if heldNotes.count == 1 {
         arpOrigin = CACurrentMediaTime()
         lastArpStep = -1
       }
-      tickArp(force: true)
+      ensureRunning()
+      syncSynth()
+      pushArp(retrigger: heldNotes.count == 1)
     } else {
       for n in notes {
         let count = soundingCount[n, default: 0]
@@ -1118,8 +1176,10 @@ final class LoopEngine: ObservableObject {
   }
 
   func releaseNote(_ midi: Int) {
+    latchTouches.remove(midi)
     guard heldNotes.contains(midi) else { return }
     heldNotes.remove(midi)
+    heldOrder.removeAll { $0 == midi }
     let notes = chordFor.removeValue(forKey: midi) ?? [midi]
     for n in notes {
       let count = soundingCount[n, default: 0]
@@ -1132,6 +1192,7 @@ final class LoopEngine: ObservableObject {
       }
     }
     if heldNotes.isEmpty { lastArpStep = -1 }
+    pushArp()
   }
 
   func setChordMode(_ on: Bool) { chordMode = on }
@@ -1144,24 +1205,68 @@ final class LoopEngine: ObservableObject {
     return MusicKey.chordName(notes, flats: MusicKey.usesFlats(root: scaleRoot, mode: scaleMode))
   }
 
-  /// Every note the held pads are sounding (their chords in chord mode).
+  /// Pads feeding the arp: the latched pattern plus anything held, in the order played.
+  private var arpPads: [Int] {
+    arpLatch ? latchedPads + heldOrder.filter { !latchedPads.contains($0) } : heldOrder
+  }
+
+  /// Every note the arp's pads are sounding (their chords in chord mode), in the order
+  /// played, each once.
   private func arpNotes() -> [Int] {
-    Array(Set(heldNotes.flatMap { chordFor[$0] ?? [$0] })).sorted()
+    var seen = Set<Int>()
+    return arpPads.flatMap { chordFor[$0] ?? [$0] }.filter { seen.insert($0).inserted }
   }
 
   func setArpOn(_ on: Bool) {
     arpOn = on
+    if !on { clearLatch() }
     lastArpStep = -1
     arpOrigin = CACurrentMediaTime()
-    if on, !heldNotes.isEmpty { tickArp(force: true) }
+    pushArp(retrigger: on && !heldNotes.isEmpty)
   }
 
   func setArpDivision(_ n: Int) {
     arpDivision = n
     lastArpStep = -1
+    pushArp()
   }
 
-  func setArpMode(_ mode: Int) { arpMode = mode }
+  func setArpMode(_ mode: Int) {
+    // Tapping Rand again deals a new random order.
+    if mode == 4 { arpSeed = arpSeed &* 6364136223846793005 &+ 1442695040888963407 }
+    arpMode = mode
+    pushArp()
+  }
+
+  func setArpOctaves(_ n: Int) {
+    arpOctaves = min(4, max(1, n))
+    pushArp()
+  }
+
+  func setArpLatch(_ on: Bool) {
+    arpLatch = on
+    if !on { clearLatch() }
+    pushArp()
+  }
+
+  private func clearLatch() {
+    for p in latchedPads where !heldNotes.contains(p) { chordFor[p] = nil }
+    latchedPads = []
+  }
+
+  /// Hand the arp its notes and timing. Also refreshed from the UI tick so tempo and
+  /// transport changes reach it.
+  private func pushArp(retrigger: Bool = false) {
+    liveArp.update(
+      on: arpOn && inputMode == "keys" && !arpPads.isEmpty,
+      notes: arpSequence(),
+      division: arpDivision,
+      bpm: Double(bpm),
+      transport: running,
+      freeOrigin: arpOrigin,
+      retrigger: retrigger
+    )
+  }
 
   func typingDown(_ raw: String) {
     guard inputMode != "mic" else { return }
@@ -1273,6 +1378,34 @@ final class LoopEngine: ObservableObject {
     }
   }
 
+  /// Solo is for loops: while any loop is soloed, the others go silent (keeping time, like
+  /// mute). Drums and keys are unaffected.
+  func toggleSolo(_ id: String) {
+    guard let i = layers.firstIndex(where: { $0.id == id }) else { return }
+    layers[i].soloed.toggle()
+    for layer in layers { applyLayerMix(layer) }
+  }
+
+  /// Where a loop's playhead is across its own waveform (0...1): the cycle position,
+  /// or for a half-speed loop, across two cycles.
+  func displayPosition(for layer: Layer) -> Double {
+    guard layer.halfSpeed else { return position }
+    let elapsed = max(0, CACurrentMediaTime() - cycleStart)
+    let cycle = Int(floor(elapsed / max(loopDuration, 0.05)))
+    return (Double(cycle % 2) + position) / 2
+  }
+
+  /// Silent because muted, or because another loop is soloed.
+  func isSilenced(_ layer: Layer) -> Bool {
+    layer.muted || (!layer.soloed && layers.contains { $0.soloed })
+  }
+
+  func toggleHalfSpeed(_ id: String) {
+    guard let i = layers.firstIndex(where: { $0.id == id }) else { return }
+    layers[i].halfSpeed.toggle()
+    liveLayers.setHalfSpeed(index: layers[i].slot.index, layers[i].halfSpeed)
+  }
+
   func toggleReverse(_ id: String) {
     guard let i = layers.firstIndex(where: { $0.id == id }) else { return }
     layers[i].reversed.toggle()
@@ -1285,15 +1418,19 @@ final class LoopEngine: ObservableObject {
     liveLayers.clear(index: idx)
     setSends(layers[i].slot, delay: 0, reverb: 0)
     layers[i].slot.busy = false
+    let wasSoloed = layers[i].soloed
     layers.remove(at: i)
     if layers.isEmpty {
       loopLocked = false
       liveLayers.clearAll()
+    } else if wasSoloed {
+      // Its solo was holding the others silent.
+      for layer in layers { applyLayerMix(layer) }
     }
   }
 
   private func applyLayerMix(_ layer: Layer) {
-    liveLayers.setMix(index: layer.slot.index, gain: layer.gain, pan: layer.pan, muted: layer.muted, drive: layer.drive)
+    liveLayers.setMix(index: layer.slot.index, gain: layer.gain, pan: layer.pan, muted: isSilenced(layer), drive: layer.drive)
     setSends(layer.slot, delay: layer.delay, reverb: layer.reverb)
   }
 
@@ -1355,7 +1492,7 @@ final class LoopEngine: ObservableObject {
     var files: [(String, Data)] = []
     if drumsOn {
       let pattern = DrumLibrary.find(drumId)
-      let buf = AudioDSP.renderPattern(pattern, bpm: Double(bpm), loopBars: bars, format: format, acoustic: acousticKit)
+      let buf = AudioDSP.renderPattern(pattern, bpm: Double(bpm), loopBars: bars, format: format, acoustic: acousticKit, analog: drumKit.analog, neon: drumKit == .neon, sampler: drumKit.sampler)
       AudioDSP.colorDrums(buf, drive: drumDrive, dirt: drumDirt, vinyl: drumVinyl, comp: drumComp,
                           crackle: vinylTrack(for: pattern, frames: Int(buf.frameLength), bpm: Double(bpm), sampleRate: format.sampleRate))
       files.append(("Drums - \(pattern.name).wav", AudioDSP.encodeWav(buf)))
@@ -1408,37 +1545,24 @@ final class LoopEngine: ObservableObject {
     clock = timer
   }
 
-  private func tickArp(force: Bool) {
-    guard arpOn, inputMode == "keys", !heldNotes.isEmpty else { return }
-    let notes = arpSequence()
-    guard !notes.isEmpty else { return }
-    let div = max(1, arpDivision)
-    let step: Int
-    if status == .countin {
-      let beats = (CACurrentMediaTime() - cycleStart) / (60 / Double(bpm))
-      step = max(0, Int(floor(beats * Double(div) + 1e-9)))
-    } else if running {
-      let beats = position * Double(bars * 4)
-      step = max(0, Int(floor(beats * Double(div) + 1e-9)))
-    } else {
-      let stepDur = (60 / Double(bpm)) / Double(div)
-      step = max(0, Int(floor((CACurrentMediaTime() - arpOrigin) / max(stepDur, 0.02))))
-    }
-    if !force, step == lastArpStep { return }
-    lastArpStep = step
-    let pulse = notes.count == 1
-    noteOn(notes[step % notes.count], velocity: pulse ? 0.95 : 0.85, steal: pulse)
-  }
 
+
+  /// The pattern the arp loops: its notes (chord mode: one pad arpeggiates its whole
+  /// chord) across the octave range, in the chosen order.
   private func arpSequence() -> [Int] {
-    // Chord mode + arp: one pad arpeggiates its whole chord.
-    let sorted = arpNotes()
-    if sorted.count < 2 { return sorted }
+    let played = arpNotes()
+    let octaves = (0..<arpOctaves).map { 12 * $0 }
+    // As played and random keep the tapped order in each octave; the rest go low to high.
+    let base = arpMode >= 3 ? played : played.sorted()
+    let seq = octaves.flatMap { o in base.map { $0 + o } }.filter { $0 <= 108 }
+    if seq.count < 2 { return seq }
     switch arpMode {
-    case 1: return sorted.reversed()
-    case 2:
-      return sorted + Array(sorted.dropFirst().dropLast().reversed())
-    default: return sorted
+    case 1: return seq.reversed()
+    case 2: return seq + Array(seq.dropFirst().dropLast().reversed())
+    case 4:
+      var rng = SeededRandom(seed: arpSeed)
+      return seq.shuffled(using: &rng)
+    default: return seq
     }
   }
 
@@ -1454,7 +1578,7 @@ final class LoopEngine: ObservableObject {
     }
     guard running || status == .countin else {
       if position != 0 { position = 0 }
-      tickArp(force: false)
+      pushArp()
       return
     }
     let now = CACurrentMediaTime()
@@ -1470,7 +1594,7 @@ final class LoopEngine: ObservableObject {
         startCapture()
         applyGains()
       }
-      tickArp(force: false)
+      pushArp()
       return
     }
     let elapsed = now - cycleStart
@@ -1502,13 +1626,11 @@ final class LoopEngine: ObservableObject {
     if fillArmed, !closedTake, toNextBar < 0.12 {
       beginFill(at: now + toNextBar)
     }
-    tickArp(force: false)
-    if status == .armed && (pos < 0.08 || pos > 0.96) && elapsed > 0.1 {
-      startCapture()
-      status = .recording
-      applyGains()
-      rescheduleMetro()
-    }
+    pushArp()
+    let progress = capturing ? liveLayers.captureProgress() : nil
+    let start = progress?.start ?? -1, done = progress?.done ?? 0
+    if takeStart != start { takeStart = start }
+    if takeDone != done { takeDone = done }
   }
 
   private func startCapture() {
@@ -1528,6 +1650,8 @@ final class LoopEngine: ObservableObject {
   private func finishCapture(force: Bool) {
     guard capturing else { return }
     capturing = false
+    takeStart = -1
+    takeDone = 0
     liveLayers.endRecord(activate: true)
     liveMetro.stop()
     status = .playing
@@ -1593,7 +1717,10 @@ final class LoopEngine: ObservableObject {
       bpm: Double(bpm),
       loopBars: fill.bars,
       format: format,
-      acoustic: acousticKit
+      acoustic: acousticKit,
+      analog: drumKit.analog,
+      neon: drumKit == .neon,
+      sampler: drumKit.sampler
     )
     let dur = Double(fill.bars * 4) * 60 / Double(bpm)
     // Start on a bar line: the upcoming one when queued early, else the one just crossed.
@@ -1621,7 +1748,10 @@ final class LoopEngine: ObservableObject {
       bpm: Double(bpm),
       loopBars: bars,
       format: format,
-      acoustic: acousticKit
+      acoustic: acousticKit,
+      analog: drumKit.analog,
+      neon: drumKit == .neon,
+      sampler: drumKit.sampler
     )
     let crackle = vinylTrack(for: pattern, frames: Int(buf.frameLength), bpm: Double(bpm), sampleRate: format.sampleRate)
     liveDrums.setDry(buf, loopDur: loopDuration, crackle: crackle)
@@ -1712,11 +1842,14 @@ final class LoopEngine: ObservableObject {
     let bpm = Double(self.bpm)
     let format = self.format
     let acoustic = acousticKit
+    let analog = drumKit.analog
+    let neon = drumKit == .neon
+    let sampler = drumKit.sampler
     let P = jamPhraseDur
     DispatchQueue.global(qos: .userInitiated).async {
-      let gain = AudioDSP.grooveGain(groove, bpm: bpm, format: format, acoustic: acoustic)
+      let gain = AudioDSP.grooveGain(groove, bpm: bpm, format: format, acoustic: acoustic, analog: analog, neon: neon, sampler: sampler)
       let phrase = Jam.phrase(groove: groove, fill: fill, seed: seed)
-      let buf = AudioDSP.renderPattern(phrase, bpm: bpm, loopBars: Jam.phraseBars, format: format, acoustic: acoustic, fixedGain: gain)
+      let buf = AudioDSP.renderPattern(phrase, bpm: bpm, loopBars: Jam.phraseBars, format: format, acoustic: acoustic, analog: analog, neon: neon, sampler: sampler, fixedGain: gain)
       let period = Int((Double(max(1, groove.bars) * 4) * 60 / bpm * format.sampleRate).rounded())
       let crackle = AudioDSP.vinylTrack(frames: Int(buf.frameLength), period: period, sampleRate: format.sampleRate, seed: AudioDSP.vinylSeed(groove.id))
       DispatchQueue.main.async {
@@ -1761,7 +1894,7 @@ final class LoopEngine: ObservableObject {
       liveMetro.stop()
       return
     }
-    if status == .armed || status == .recording || capturing {
+    if status == .recording || capturing {
       liveMetro.start(bpm: Double(bpm), beats: bars * 4, looping: true, origin: cycleStart)
       return
     }
@@ -1913,6 +2046,21 @@ final class LiveSynth: @unchecked Sendable {
     var phase2: Double = 0
     var env: Double = 0
     var releasing = false
+    /// Frames of silence before the note starts (a note placed mid-buffer).
+    var delay = 0
+    /// Frames until the note releases on its own (-1 = when its key is let go).
+    var releaseIn = -1
+    /// Analog drift: each note wanders on its own slow, randomly timed path.
+    var driftPhase = 0.0
+    var driftRate = 0.25
+    /// FM: the modulator's feedback memory per oscillator, and the brightness envelope
+    /// (1 at the note start, falling to the sustained tone).
+    var fb1 = 0.0
+    var fb2 = 0.0
+    var fmEnv = 1.0
+    /// Taken over (same note replayed, or too many voices): fades out in ~3 ms instead of
+    /// stopping dead, which clicked.
+    var dying = false
   }
 
   struct Params {
@@ -1930,6 +2078,7 @@ final class LiveSynth: @unchecked Sendable {
     var ring: Float = 0
     var glitch: Float = 0
     var release: Double = 0.09
+    var fmAmount: Float = 0.5
   }
 
   /// Note changes are queued for the render thread instead of editing its voices
@@ -1955,6 +2104,9 @@ final class LiveSynth: @unchecked Sendable {
   private var lpZR: Double = 0
   private var dcBlockL: Double = 0
   private var dcBlockR: Double = 0
+  /// Level per voice, eased toward 0.22/sqrt(voices) so notes starting and ending don't
+  /// step the level of the others (a step in a bass waveform is a click).
+  private var voiceScale: Double = 0.22
   private var rng = RTRandom()
 
   init() {
@@ -2015,6 +2167,10 @@ final class LiveSynth: @unchecked Sendable {
     get { lock.lock(); defer { lock.unlock() }; return shared.glitch }
     set { lock.lock(); shared.glitch = newValue; paramsGen &+= 1; lock.unlock() }
   }
+  var fmAmount: Float {
+    get { lock.lock(); defer { lock.unlock() }; return shared.fmAmount }
+    set { lock.lock(); shared.fmAmount = newValue; paramsGen &+= 1; lock.unlock() }
+  }
   /// Release envelope time constant in seconds (fade to -60 dB takes ~6.9x this).
   var release: Double {
     get { lock.lock(); defer { lock.unlock() }; return shared.release }
@@ -2046,10 +2202,10 @@ final class LiveSynth: @unchecked Sendable {
     switch e {
     case let .on(midi, vel, steal, env):
       if steal {
-        voices.removeAll { $0.midi == midi }
+        for i in voices.indices where voices[i].midi == midi { voices[i].dying = true }
       }
-      if voices.count >= 8 { voices.removeFirst(voices.count - 7) }
-      voices.append(Voice(midi: midi, vel: vel, env: env))
+      makeRoom()
+      voices.append(newVoice(midi: midi, vel: vel, env: env))
     case let .off(midi):
       for i in voices.indices where voices[i].midi == midi {
         voices[i].releasing = true
@@ -2057,6 +2213,40 @@ final class LiveSynth: @unchecked Sendable {
     case .allOff:
       for i in voices.indices { voices[i].releasing = true }
     }
+  }
+
+  /// Render thread. Up to 8 notes sound; past that the oldest fades out quickly, and
+  /// only a pile-up of fading notes (beyond the reserved 16) is cut outright.
+  private func makeRoom() {
+    let live = voices.filter { !$0.dying }.count
+    if live >= 8, let i = voices.firstIndex(where: { !$0.dying }) { voices[i].dying = true }
+    if voices.count >= 15 { voices.removeFirst(voices.count - 14) }
+  }
+
+  /// Render thread. A voice with its own drift timing, so a chord's notes drift apart.
+  private func newVoice(midi: Int, vel: Float, env: Double) -> Voice {
+    var v = Voice(midi: midi, vel: vel, env: env)
+    // A saw starts at its zero crossing rather than at -1 (a jump the attack can't hide
+    // on a low note).
+    v.phase = rp.wave == .saw ? 0.5 : 0
+    v.phase2 = rp.wave2 == .saw ? 0.5 : 0
+    v.driftPhase = rng.unit() * 2 * Double.pi
+    v.driftRate = 0.12 + rng.unit() * 0.28
+    return v
+  }
+
+  /// Render thread (the arp): a note that starts `offset` frames into the next buffer
+  /// and releases `gate` frames after that. A same-pitch note still ringing releases at
+  /// the new note's start rather than being cut at the buffer start.
+  func renderThreadNote(midi: Int, velocity: Float, offset: Int, gate: Int) {
+    for i in voices.indices where voices[i].midi == midi && !voices[i].releasing {
+      if voices[i].releaseIn < 0 || voices[i].releaseIn > offset { voices[i].releaseIn = offset }
+    }
+    makeRoom()
+    var v = newVoice(midi: midi, vel: velocity, env: rp.preset == .pluck ? 1 : 0.001)
+    v.delay = max(0, offset)
+    v.releaseIn = max(1, gate)
+    voices.append(v)
   }
 
   func render(frames: Int, list: UnsafeMutablePointer<AudioBufferList>) {
@@ -2100,19 +2290,43 @@ final class LiveSynth: @unchecked Sendable {
     let cutTarget = 80 * pow(14000 / 80, Double(max(0.02, min(1, rp.cutoff))))
     cutHz += 0.04 * (cutTarget - cutHz)
     let res = Double(max(0, min(1, rp.resonance)))
-    let voiceScale = 0.22 / sqrt(Double(max(1, voices.count)))
+    let scaleTarget = 0.22 / sqrt(Double(max(1, voices.filter { !$0.dying }.count)))
+    // FM brightness settles over ~0.25 s; the drop per sample.
+    let fmDecay = exp(-1 / (0.25 * sr))
+    let killCoef = exp(-1 / (0.003 * sr))
+    // FM amount: 0 is nearly a sine (a soft sub), 0.5 the voiced tone, 1 brighter with
+    // more feedback (the modulator edges toward a saw) for a growlier tone. The top half
+    // is gentler: brightness climbs steadily instead of maxing out by 0.75.
+    let fmAmt = Double(max(0, min(1, rp.fmAmount)))
+    let fmDepth = fmAmt <= 0.5 ? 0.2 + 1.6 * fmAmt : 1 + 0.9 * (fmAmt - 0.5)
+    let fmFeedback = 0.5 + 0.5 * max(0, fmAmt - 0.5)
     var i = 0
     while i < voices.count {
       var v = voices[i]
       let freq = min(sr * 0.45, a4 * pow(2.0, (Double(v.midi) - 69) / 12))
       let freq2 = min(sr * 0.45, freq * pow(2.0, Double(oct)) * pow(2.0, cents / 1200))
+      // Drift: up to +/-15 cents at full, a slow wander per note (two sines, updated per
+      // buffer). It used to read the oscillator's wrapped phase and moved ~0.005%.
+      v.driftPhase += 2 * Double.pi * v.driftRate * Double(frames) / sr
+      if v.driftPhase > 1000 { v.driftPhase = v.driftPhase.truncatingRemainder(dividingBy: 2 * Double.pi) }
+      let wander = 1 + driftAmt * 0.0087 * (0.7 * sin(v.driftPhase) + 0.3 * sin(v.driftPhase * 2.71 + 1.3))
       let attack = preset == .pad ? 0.14 : 0.005
       let release = max(0.005, rp.release)
       let releaseCoef = exp(-1 / (release * sr))
       // Pluck decays on its own; a release below the slider's maximum also shortens it on key-up.
       let pluckChoke = release < 1.15
       for f in 0..<frames {
-        if preset == .pluck {
+        if v.delay > 0 {
+          v.delay -= 1
+          continue
+        }
+        if v.releaseIn >= 0 {
+          if v.releaseIn == 0 { v.releasing = true }
+          v.releaseIn -= 1
+        }
+        if v.dying {
+          v.env *= killCoef
+        } else if preset == .pluck {
           v.env *= exp(-4.8 / sr)
           if v.releasing && pluckChoke { v.env *= releaseCoef }
         } else if v.releasing {
@@ -2120,11 +2334,23 @@ final class LiveSynth: @unchecked Sendable {
         } else if v.env < 1 {
           v.env = min(1, v.env + dt / attack)
         }
-        let wander = 1 + driftAmt * 0.004 * sin(v.phase * 0.012)
         let inc1 = freq * wander / sr
         let inc2 = freq2 * wander / sr
-        var osc1 = Self.osc(wave, phase: v.phase, inc: inc1, rng: &rng)
-        var osc2 = Self.osc(wave2, phase: v.phase2, inc: inc2, rng: &rng)
+        var osc1: Double, osc2: Double
+        if wave == .fm || wave2 == .fm {
+          // Index: a snap (harder with velocity) that settles to a warm tone. Scaled up
+          // below C3 (as the old FM keyboards did), so low notes keep the low-mid
+          // harmonics a phone speaker can play; they sit ~9 dB under the note on every
+          // note from G1 to C3, while the top end above 1.5 kHz stays ~35 dB down.
+          let keyScale = min(1.6, max(0.8, 1 + Double(48 - v.midi) * 0.04))
+          let index = (2.2 + 2.8 * v.fmEnv * (0.45 + 0.75 * Double(v.vel))) * keyScale * fmDepth
+          v.fmEnv *= fmDecay
+          osc1 = wave == .fm ? Self.fm(phase: v.phase, index: index, feedback: fmFeedback, fb: &v.fb1) : Self.osc(wave, phase: v.phase, inc: inc1, rng: &rng)
+          osc2 = wave2 == .fm ? Self.fm(phase: v.phase2, index: index, feedback: fmFeedback, fb: &v.fb2) : Self.osc(wave2, phase: v.phase2, inc: inc2, rng: &rng)
+        } else {
+          osc1 = Self.osc(wave, phase: v.phase, inc: inc1, rng: &rng)
+          osc2 = Self.osc(wave2, phase: v.phase2, inc: inc2, rng: &rng)
+        }
         v.phase += inc1
         v.phase2 += inc2
         if v.phase >= 1 { v.phase -= floor(v.phase) }
@@ -2137,7 +2363,7 @@ final class LiveSynth: @unchecked Sendable {
           let crush = pow(2.0, 6 + (1 - glitchAmt) * 6)
           osc = (osc * crush).rounded() / crush
         }
-        let s = Float(osc * v.env * Double(v.vel) * voiceScale * Self.trim(preset))
+        let s = Float(osc * v.env * Double(v.vel) * Self.trim(preset))
         left[f] += s
         if right != left { right[f] += s }
       }
@@ -2157,7 +2383,12 @@ final class LiveSynth: @unchecked Sendable {
     var dcl = dcBlockL
     var dcr = dcBlockR
     let out = 0.92 * Self.makeup(preset)
+    var scale = voiceScale
     for f in 0..<frames {
+      // ~5 ms glide to the new per-voice level.
+      scale += 0.004 * (scaleTarget - scale)
+      left[f] = Float(Double(left[f]) * scale)
+      if right != left { right[f] = Float(Double(right[f]) * scale) }
       var x = Double(left[f])
       x -= dcl
       dcl += 0.0004 * x
@@ -2173,6 +2404,7 @@ final class LiveSynth: @unchecked Sendable {
         right[f] = Float(tanh(yr * 1.15) * out)
       }
     }
+    voiceScale = scale
     lpZ = zL
     lpZR = zR
     dcBlockL = dcl
@@ -2202,6 +2434,17 @@ final class LiveSynth: @unchecked Sendable {
     }
   }
 
+  /// Two-operator FM, the way the classic digital basses were built: a sine modulator at
+  /// the same pitch, fed back on itself (averaging two samples, which keeps feedback from
+  /// squealing), bending the phase of a sine carrier. Starts at zero, so it can't click.
+  @inline(__always) private static func fm(phase: Double, index: Double, feedback: Double, fb: inout Double) -> Double {
+    let w = 2 * Double.pi * phase
+    let m = sin(w + feedback * fb)
+    fb = 0.5 * (fb + m)
+    // Level: the bass preset lands ~1 dB over the old filtered-saw bass.
+    return sin(w + index * m) * 0.88
+  }
+
   /// Band-limited analog-style osc. Phase is 0..<1.
   private static func osc(_ wave: OscWave, phase: Double, inc: Double, rng: inout RTRandom) -> Double {
     let t = phase - floor(phase)
@@ -2225,6 +2468,8 @@ final class LiveSynth: @unchecked Sendable {
       let tri = 1 - abs(4 * t - 2)
       let sq = t < 0.5 ? 0.28 : -0.28
       return tri * 0.72 + sq
+    case .fm:
+      return sin(2 * Double.pi * t)  // FM is rendered with its voice state; see fm()
     }
   }
 
@@ -2243,6 +2488,88 @@ final class LiveSynth: @unchecked Sendable {
 }
 
 /// Dry drum buffer played in lock-step with the transport; drive/dirt/vinyl are live.
+/// Arpeggiator on the render thread, on the transport grid. Each step starts on its exact
+/// sample and releases after 75% of the step. (It used to run from the 50 ms UI timer,
+/// landing 0-50 ms late plus main-thread jitter, and its notes never released.)
+final class LiveArp: @unchecked Sendable {
+  private struct Settings {
+    var on = false
+    var division = 4
+    var bpm: Double = 120
+    var transport = false
+    var freeOrigin: TimeInterval = 0
+    var retrigger = 0
+  }
+
+  private let lock = NSLock()
+  private var shared = Settings()
+  private var sharedNotes: [Int] = []
+
+  // Render thread.
+  private var r = Settings()
+  private var notes: [Int] = []
+  private var lastRetrigger = 0
+  private var retriggeredStep = Int.min
+
+  static let gate = 0.75
+  /// Longest pattern: every pad in 7th chords across four octaves, played ping-pong.
+  static let maxSteps = 512
+
+  init() {
+    sharedNotes.reserveCapacity(Self.maxSteps)
+    notes.reserveCapacity(Self.maxSteps)
+  }
+
+  /// Main thread: the notes to play (in order), timing, and whether this is a fresh press
+  /// (which plays at once, then continues on the grid).
+  func update(on: Bool, notes seq: [Int], division: Int, bpm: Double, transport: Bool, freeOrigin: TimeInterval, retrigger: Bool) {
+    lock.lock()
+    shared.on = on
+    shared.division = max(1, division)
+    shared.bpm = max(20, bpm)
+    shared.transport = transport
+    shared.freeOrigin = freeOrigin
+    if retrigger { shared.retrigger &+= 1 }
+    sharedNotes.removeAll(keepingCapacity: true)
+    sharedNotes.append(contentsOf: seq.prefix(Self.maxSteps))
+    lock.unlock()
+  }
+
+  /// Render thread, before the synth renders this buffer.
+  func process(_ ts: UnsafePointer<AudioTimeStamp>?, frames: Int, clock: TransportClock, synth: LiveSynth) {
+    if lock.try() {
+      r = shared
+      // Copy the values, not the array: nothing the renderer holds is ever freed here.
+      notes.removeAll(keepingCapacity: true)
+      for n in sharedNotes { notes.append(n) }
+      lock.unlock()
+    }
+    guard r.on, !notes.isEmpty else { return }
+    let now = clock.time(ts, frames: frames)
+    let sr = now.rate
+    // Grid time: the beat grid while the transport runs, else from the first press.
+    let g0 = r.transport ? now.t : (now.cycleStart + now.t) - r.freeOrigin
+    let step = 60 / r.bpm / Double(r.division)
+    let g1 = g0 + Double(frames) / sr
+    let gate = Int(step * Self.gate * sr)
+    let vel: Float = notes.count == 1 ? 0.95 : 0.85
+    if r.retrigger != lastRetrigger {
+      lastRetrigger = r.retrigger
+      let k = Int(floor(g0 / step))
+      retriggeredStep = k
+      synth.renderThreadNote(midi: notes[((k % notes.count) + notes.count) % notes.count], velocity: vel, offset: 0, gate: gate)
+    }
+    var k = Int(ceil(g0 / step))
+    while Double(k) * step < g1 {
+      if k != retriggeredStep {
+        let offset = min(frames - 1, max(0, Int(((Double(k) * step - g0) * sr).rounded())))
+        synth.renderThreadNote(midi: notes[((k % notes.count) + notes.count) % notes.count], velocity: vel, offset: offset, gate: gate)
+      }
+      k += 1
+    }
+  }
+}
+
 final class LiveDrums: @unchecked Sendable {
   /// State written by the main thread under `lock`. The render thread copies it
   /// with `lock.try()` and never waits: if the lock is busy it plays on with its
@@ -2504,5 +2831,19 @@ final class LiveDrums: @unchecked Sendable {
       outL[i] = x
       if outR != outL { outR[i] = y }
     }
+  }
+}
+
+/// Small seeded generator (SplitMix64) so a random arp order is the same every time
+/// it's rebuilt, and only changes when asked.
+struct SeededRandom: RandomNumberGenerator {
+  private var state: UInt64
+  init(seed: UInt64) { state = seed }
+  mutating func next() -> UInt64 {
+    state &+= 0x9E37_79B9_7F4A_7C15
+    var z = state
+    z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+    z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+    return z ^ (z >> 31)
   }
 }

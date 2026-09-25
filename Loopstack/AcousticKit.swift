@@ -66,10 +66,7 @@ enum AcousticKit {
       (0.45, ["tom_v2"]),
       (1.00, ["tom_v4"]),
     ])
-    put(.perc, [
-      (0.40, ["perc_v1"]),
-      (1.00, ["perc_v3"]),
-    ])
+    // No perc samples: the kit's perc is the synthesised shaker (these were a cowbell).
     lock.lock()
     if !loaded {
       banks = built
@@ -122,7 +119,7 @@ enum AcousticKit {
     case .hat: dB = -0.3
     case .ohat: dB = 1.3
     case .clap: dB = 4.7
-    case .rim: dB = 20.7
+    case .rim: dB = 15.4   // punch-matched at 20.7, but its sharp ~3 kHz click peaked over the snare
     case .tom: dB = 12.8
     case .perc: dB = 21.3
     }

@@ -172,7 +172,8 @@ struct TransportView: View {
         }
       }
 
-      LoopRuler(position: engine.position, recording: engine.recording, running: engine.running, bars: min(engine.bars, 8))
+      LoopRuler(position: engine.position, recording: engine.recording, running: engine.running, bars: min(engine.bars, 8),
+                takeStart: engine.takeStart, takeDone: engine.takeDone)
 
       HStack(spacing: 12) {
         Spacer()
@@ -182,8 +183,12 @@ struct TransportView: View {
             .fill(engine.recording ? LS.record : LS.surface2)
             .frame(width: 72, height: 72)
             .overlay(
+              // How much of the loop the take has so far; it closes when the ring does.
               Circle()
-                .stroke(engine.status == .armed ? LS.record.opacity(0.7) : .clear, lineWidth: 2)
+                .trim(from: 0, to: engine.takeDone)
+                .stroke(LS.recordFg, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .padding(4)
             )
             .overlay(
               Circle()
@@ -248,8 +253,7 @@ struct TransportView: View {
     case .idle: return "STOPPED"
     case .playing: return "PLAYING"
     case .countin: return "COUNT-IN \(engine.countInBeat + 1)"
-    case .armed: return "ARMED"
-    case .recording: return "RECORDING"
+    case .recording: return engine.takeStart < 0 ? "RECORDING" : "RECORDING \(Int(engine.takeDone * 100))%"
     }
   }
 
@@ -275,7 +279,7 @@ struct LayersView: View {
           .foregroundStyle(LS.muted)
       }
       if engine.layers.isEmpty {
-        Text("Arm record and play the keys, or open a microphone. When the cycle closes, a layer lands here.")
+        Text("Press record anywhere in the loop and play the keys, or open a microphone. It captures one full pass and closes where it started, then the layer lands here.")
           .font(.system(size: 14))
           .foregroundStyle(LS.muted)
       } else {
@@ -288,21 +292,23 @@ struct LayersView: View {
               Text(layer.name)
                 .foregroundStyle(LS.fg)
               Spacer()
-              Button("Rev") { engine.toggleReverse(layer.id) }
-                .font(.system(size: 12))
-                .foregroundStyle(layer.reversed ? LS.accent : LS.muted)
-              Button(layer.muted ? "Muted" : "Mute") { engine.toggleMute(layer.id) }
-                .font(.system(size: 12))
-                .foregroundStyle(LS.muted)
-              Button("Delete") { engine.deleteLayer(layer.id) }
-                .font(.system(size: 12))
-                .foregroundStyle(LS.record)
+              HStack(spacing: 2) {
+                rowButton("Rev", on: layer.reversed) { engine.toggleReverse(layer.id) }
+                rowButton("½", on: layer.halfSpeed, size: 15) { engine.toggleHalfSpeed(layer.id) }
+                  .accessibilityLabel(layer.halfSpeed ? "Half speed on" : "Half speed")
+                rowButton(layer.muted ? "Muted" : "Mute", on: false) { engine.toggleMute(layer.id) }
+                rowButton("Solo", on: layer.soloed) { engine.toggleSolo(layer.id) }
+                  .accessibilityLabel(layer.soloed ? "Solo on" : "Solo")
+                rowButton("Delete", on: false, color: LS.record) { engine.deleteLayer(layer.id) }
+              }
             }
             PeakView(
-              peaks: layer.peaks,
-              position: engine.position,
+              // Shows what's playing: mirrored for Rev, and a half-speed loop's playhead
+              // crosses it over two cycles.
+              peaks: layer.reversed ? Array(layer.peaks.reversed()) : layer.peaks,
+              position: engine.displayPosition(for: layer),
               running: engine.running,
-              muted: layer.muted,
+              muted: engine.isSilenced(layer),
               recording: engine.recording && index == engine.layers.count - 1
             )
             FxStrip(
@@ -376,6 +382,12 @@ struct InstrumentView: View {
         }
       }
 
+      // Pads sit right under the sounds, close to the transport above, so recording
+      // after a count-in doesn't mean scrolling past the settings. Settings follow.
+      if engine.inputMode != "mic" {
+        KeyPadView(engine: engine)
+      }
+
       HStack {
         Button("Save sound") {
           saveName = engine.savedSounds.first(where: { $0.id == engine.activeSoundId })?.name ?? ""
@@ -401,10 +413,6 @@ struct InstrumentView: View {
 
       if engine.inputMode == "mic" {
         micBlock
-      }
-
-      if engine.inputMode != "mic" {
-        KeyPadView(engine: engine)
       }
     }
     .alert("Save sound", isPresented: $saveOpen) {
@@ -481,6 +489,9 @@ struct InstrumentView: View {
           FxRow(label: "Cut", value: engine.cutoff, display: "\(Int(engine.cutoff * 100))", onChange: engine.setCutoff)
           FxRow(label: "Q", value: engine.resonance, display: "\(Int(engine.resonance * 100))", onChange: engine.setResonance)
         }
+        if engine.instrumentWave == .fm || engine.instrumentWave2 == .fm {
+          FxRow(label: "FM", value: engine.instrumentFM, display: "\(Int(engine.instrumentFM * 100))", onChange: engine.setInstrumentFM)
+        }
         FxStrip(
           name: "Keys",
           vol: engine.instrumentGain, pan: engine.instrumentPan,
@@ -496,6 +507,7 @@ struct InstrumentView: View {
         FxRow(label: "Ring", value: engine.instrumentRing, display: "\(Int(engine.instrumentRing * 100))", onChange: engine.setInstrumentRing)
         FxRow(label: "Rel", value: engine.instrumentRelease, display: releaseLabel(engine.instrumentRelease), onChange: engine.setInstrumentRelease)
         FxRow(label: "Tape", value: engine.instrumentTape, display: "\(Int(engine.instrumentTape * 100))", onChange: engine.setInstrumentTape)
+        FxRow(label: "Wear", value: engine.instrumentWear, display: "\(Int(engine.instrumentWear * 100))", onChange: engine.setInstrumentWear)
       }
     }
   }
@@ -624,10 +636,32 @@ struct KeyPadView: View {
           pill("1/16", on: engine.arpDivision == 4) { engine.setArpDivision(4) }
           pill("1/32", on: engine.arpDivision == 8) { engine.setArpDivision(8) }
         }
+        ScrollView(.horizontal, showsIndicators: false) {
+          HStack(spacing: 6) {
+            pill("Up", on: engine.arpMode == 0) { engine.setArpMode(0) }
+            pill("Down", on: engine.arpMode == 1) { engine.setArpMode(1) }
+            pill("Ping", on: engine.arpMode == 2) { engine.setArpMode(2) }
+            pill("Order", on: engine.arpMode == 3) { engine.setArpMode(3) }
+            pill("Rand", on: engine.arpMode == 4) { engine.setArpMode(4) }
+          }
+        }
         HStack(spacing: 6) {
-          pill("Up", on: engine.arpMode == 0) { engine.setArpMode(0) }
-          pill("Down", on: engine.arpMode == 1) { engine.setArpMode(1) }
-          pill("Ping", on: engine.arpMode == 2) { engine.setArpMode(2) }
+          Text("OCT")
+            .font(.system(size: 11, weight: .medium))
+            .tracking(1.6)
+            .foregroundStyle(LS.subtle)
+          ForEach(1...4, id: \.self) { n in
+            pill("\(n)", on: engine.arpOctaves == n) { engine.setArpOctaves(n) }
+          }
+          Spacer(minLength: 0)
+          pill("Latch", on: engine.arpLatch) { engine.setArpLatch(!engine.arpLatch) }
+        }
+        if engine.arpLatch {
+          Text(engine.latchedPads.isEmpty
+               ? "Tap pads to build the pattern. Tap one again to take it out."
+               : "\(engine.latchedPads.count) pad\(engine.latchedPads.count == 1 ? "" : "s") in the pattern. Tap a lit pad to take it out.")
+            .font(.system(size: 12))
+            .foregroundStyle(LS.muted)
         }
       }
       LazyVGrid(
@@ -635,7 +669,7 @@ struct KeyPadView: View {
         spacing: 8
       ) {
         ForEach(engine.padNotes) { note in
-          let on = engine.heldNotes.contains(note.midi)
+          let on = engine.heldNotes.contains(note.midi) || engine.latchedPads.contains(note.midi)
           Text(engine.padLabel(note))
             .font(.system(size: 16, weight: note.isRoot ? .semibold : .medium, design: .monospaced))
             .minimumScaleFactor(0.7)
@@ -750,8 +784,9 @@ struct DrumsView: View {
           .tint(LS.accent)
       }
       HStack(spacing: 6) {
-        pill("Analog", on: !engine.acousticKit) { engine.setAcousticKit(false) }
-        pill("Acoustic", on: engine.acousticKit) { engine.setAcousticKit(true) }
+        ForEach(DrumKit.allCases) { kit in
+          pill(kit.label, on: engine.drumKit == kit) { engine.setDrumKit(kit) }
+        }
       }
       Text(
         engine.jamMode
@@ -900,19 +935,47 @@ struct LoopRuler: View {
   var recording: Bool
   var running: Bool
   var bars: Int
+  /// The take in progress, as loop fractions: where it began (-1: none) and how much it has.
+  var takeStart: Double = -1
+  var takeDone: Double = 0
   var body: some View {
     GeometryReader { geo in
       ZStack(alignment: .leading) {
         Capsule().fill(LS.surface2)
+        if takeStart >= 0 {
+          // Captured so far, from where record was pressed, wrapping round the loop.
+          let w = geo.size.width
+          let first = min(takeDone, 1 - takeStart)
+          Rectangle()
+            .fill(LS.record.opacity(0.45))
+            .frame(width: CGFloat(first) * w)
+            .offset(x: CGFloat(takeStart) * w)
+          Rectangle()
+            .fill(LS.record.opacity(0.45))
+            .frame(width: CGFloat(max(0, takeDone - first)) * w)
+        }
         Capsule()
           .fill(recording ? LS.record : LS.accent)
           .frame(width: 3)
           .offset(x: max(0, CGFloat(position) * geo.size.width - 1.5))
           .opacity(running || recording ? 1 : 0.3)
       }
+      .clipShape(Capsule())
     }
     .frame(height: 8)
   }
+}
+
+/// Loop-row button with a full-size touch target (44 pt tall, at least 40 wide).
+private func rowButton(_ title: String, on: Bool, size: CGFloat = 12, color: Color? = nil, action: @escaping () -> Void) -> some View {
+  Button(action: action) {
+    Text(title)
+      .font(.system(size: size, weight: size > 12 ? .medium : .regular))
+      .foregroundStyle(color ?? (on ? LS.accent : LS.muted))
+      .frame(minWidth: 40, minHeight: 44)
+      .contentShape(Rectangle())
+  }
+  .buttonStyle(.plain)
 }
 
 struct PeakView: View {
