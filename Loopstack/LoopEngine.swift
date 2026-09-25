@@ -327,6 +327,12 @@ final class LoopEngine: ObservableObject {
   private let instReverb = AVAudioUnitReverb()
   private let instPost = AVAudioMixerNode()
   private let micMixer = AVAudioMixerNode()
+  /// What a loop take records: the keys channel plus, in Mic mode, the mic. Separate
+  /// from what's heard, so the mic is recorded even when it isn't monitored, and the bus
+  /// itself is silent (it drains into `takeSink` at zero volume).
+  private let takeBus = AVAudioMixerNode()
+  private let micToTake = AVAudioMixerNode()
+  private let takeSink = AVAudioMixerNode()
   private let loopDelay = AVAudioUnitDelay()
   private let loopReverb = AVAudioUnitReverb()
   private let loopDelayBus = AVAudioMixerNode()
@@ -511,7 +517,11 @@ final class LoopEngine: ObservableObject {
       micArmed = false
       return
     }
-    engine.connect(input, to: micMixer, format: f)
+    // The mic feeds monitoring (headphones only) and, in Mic mode, the loop take.
+    engine.connect(input, to: [
+      AVAudioConnectionPoint(node: micMixer, bus: 0),
+      AVAudioConnectionPoint(node: micToTake, bus: 0),
+    ], fromBus: 0, format: f)
     micArmed = true
     if sampleRecording { installSampleTap(format: f) }
   }
@@ -653,7 +663,7 @@ final class LoopEngine: ObservableObject {
     guard !graphReady else { return }
     graphReady = true
     let main = engine.mainMixerNode
-    [loopsMixer, drumsMixer, metroMixer, instMixer, instDelay, instReverb, instPost, micMixer, loopDelay, loopReverb, loopDelayBus, loopReverbBus].forEach { engine.attach($0) }
+    [loopsMixer, drumsMixer, metroMixer, instMixer, instDelay, instReverb, instPost, micMixer, loopDelay, loopReverb, loopDelayBus, loopReverbBus, takeBus, micToTake, takeSink].forEach { engine.attach($0) }
     liveDrums.sampleRate = format.sampleRate
     let dnode = AudioGraph.drumsNode(format: format, drums: liveDrums, tape: drumTapeSim)
     engine.attach(dnode)
@@ -684,7 +694,15 @@ final class LoopEngine: ObservableObject {
     engine.connect(instMixer, to: instDelay, format: format)
     engine.connect(instDelay, to: instReverb, format: format)
     engine.connect(instReverb, to: instPost, format: format)
-    engine.connect(instPost, to: main, format: format)
+    // Keys go to the speakers and to the take bus; the mic joins the take bus in Mic mode.
+    let keysOut = AVAudioConnectionPoint(node: main, bus: main.nextAvailableInputBus)
+    let keysTake = AVAudioConnectionPoint(node: takeBus, bus: takeBus.nextAvailableInputBus)
+    engine.connect(instPost, to: [keysOut, keysTake], fromBus: 0, format: format)
+    engine.connect(micToTake, to: takeBus, format: format)
+    engine.connect(takeBus, to: takeSink, format: format)
+    engine.connect(takeSink, to: main, format: format)
+    takeSink.outputVolume = 0
+    micToTake.outputVolume = 0
     engine.connect(micMixer, to: main, format: format)
     engine.connect(loopDelayBus, to: loopDelay, format: format)
     // Loop effects return through the loops channel so the Loops fader moves the
@@ -713,7 +731,7 @@ final class LoopEngine: ObservableObject {
     engine.attach(node)
     engine.connect(node, to: instMixer, format: format)
     synthNode = node
-    AudioGraph.installPostTap(on: instPost, format: format, layers: liveLayers)
+    AudioGraph.installPostTap(on: takeBus, format: format, layers: liveLayers)
     tapInstalled = true
     for i in 0..<8 {
       let slot = LayerSlot(index: i)
@@ -804,6 +822,7 @@ final class LoopEngine: ObservableObject {
     let phones = Self.privateOutput()
     if phones != headphonesOn { headphonesOn = phones }
     micMixer.outputVolume = (monitorOn && micArmed && phones) ? micGain * 0.7 : 0
+    micToTake.outputVolume = (inputMode == "mic" && micArmed) ? micGain : 0
   }
 
   /// Output is headphones or another private listening device (wired, Bluetooth, USB),
@@ -1023,6 +1042,7 @@ final class LoopEngine: ObservableObject {
   }
   func setInputMode(_ mode: String) {
     inputMode = mode
+    defer { applyGains() }
     defer { updateMIDIRoute() }
     if mode == "sampler" {
       playSampler = true
@@ -2123,7 +2143,11 @@ final class LoopEngine: ObservableObject {
     captureSlot = slot
     let n = max(1, Int((loopDuration * format.sampleRate).rounded()))
     liveLayers.setClock(start: cycleStart, dur: loopDuration, sampleRate: format.sampleRate)
-    liveLayers.beginRecord(index: slot.index, frames: n, gain: 0.9)
+    // A mic take arrives late by the input and output latency (the singer hears the loop
+    // late and their voice reaches the app late), so it's written that much earlier.
+    let s = AVAudioSession.sharedInstance()
+    let micShift = (inputMode == "mic" && micArmed) ? s.inputLatency + s.outputLatency + s.ioBufferDuration : 0
+    liveLayers.beginRecord(index: slot.index, frames: n, gain: 0.9, shift: micShift)
     capturing = true
     captureBegan = CACurrentMediaTime()
     loopLocked = true

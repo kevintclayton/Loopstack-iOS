@@ -88,6 +88,8 @@ final class LiveLayers: @unchecked Sendable {
   private var recAligned = false
   /// Frames waited for a timestamp before falling back.
   private var recSkipped = 0
+  /// Seconds the take is moved earlier (mic latency).
+  private var recShift = 0.0
   /// What was played just past a full cycle, crossfaded over the take's first frames so
   /// the join (where record was pressed) is seamless.
   private var recTailL: [Float] = []
@@ -152,7 +154,8 @@ final class LiveLayers: @unchecked Sendable {
     _ = dead
   }
 
-  func beginRecord(index: Int, frames: Int, gain: Float) {
+  /// `shift`: seconds to move the take earlier (a mic's round-trip latency).
+  func beginRecord(index: Int, frames: Int, gain: Float, shift: Double = 0) {
     guard Self.slotRange.contains(index), frames > 1 else { return }
     let n = frames
     var slot = Slot()
@@ -171,6 +174,7 @@ final class LiveLayers: @unchecked Sendable {
     recStart = -1
     recAligned = false
     recSkipped = 0
+    recShift = max(0, shift)
     let xf = max(1, min(n / 4, Int(0.01 * sampleRate)))
     recTailL = [Float](repeating: 0, count: xf)
     recTailR = [Float](repeating: 0, count: xf)
@@ -213,8 +217,9 @@ final class LiveLayers: @unchecked Sendable {
     let srcL = data[0]
     let srcR = buffer.format.channelCount > 1 ? data[1] : data[0]
     // Outside our lock: the clock has its own.
-    let t0 = when.flatMap { $0.isSampleTimeValid ? clock.transportTime(sampleTime: Double($0.sampleTime)) : nil }
+    let tRaw = when.flatMap { $0.isSampleTimeValid ? clock.transportTime(sampleTime: Double($0.sampleTime)) : nil }
     lock.lock()
+    let t0 = tRaw.map { $0 - recShift }
     defer { lock.unlock() }
     guard recording, slots.indices.contains(recIndex) else { return }
     let n = slots[recIndex].n
