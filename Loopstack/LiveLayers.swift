@@ -182,6 +182,30 @@ final class LiveLayers: @unchecked Sendable {
     _ = dead
   }
 
+  #if DEBUG
+  /// Screenshot demo only: puts a finished take in a slot, as if it had just been
+  /// recorded (it starts playing on the next transport start, from the downbeat).
+  func debugInstall(index: Int, l: [Float], r: [Float]) {
+    guard Self.slotRange.contains(index), l.count > 1, r.count == l.count else { return }
+    var slot = Slot()
+    slot.left = l
+    slot.right = r
+    slot.revL = l.reversed()
+    slot.revR = r.reversed()
+    slot.n = l.count
+    slot.gain = 0.9
+    slot.phase = 0
+    lock.lock()
+    retire(slots[index])
+    slot.activation = slots[index].activation &+ 1
+    slots[index] = slot
+    changed()
+    let dead = retired.collect(seen: seenGen)
+    lock.unlock()
+    _ = dead
+  }
+  #endif
+
   func punchIn(buffer: AVAudioPCMBuffer, when: AVAudioTime? = nil) {
     guard let data = buffer.floatChannelData else { return }
     let frames = Int(buffer.frameLength)

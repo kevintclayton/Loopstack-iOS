@@ -20,9 +20,16 @@ struct StudioView: View {
       }
     }
     .preferredColorScheme(.dark)
+    #if DEBUG
+    .task {
+      // Screenshot demo: launch with `-demo stack|keys|loops|drums|song`.
+      if let scene = UserDefaults.standard.string(forKey: "demo") { engine.loadDemo(scene) }
+    }
+    #endif
   }
 
   private var desk: some View {
+    ScrollViewReader { proxy in
     ScrollView {
       VStack(alignment: .leading, spacing: 16) {
         header
@@ -31,10 +38,10 @@ struct StudioView: View {
           SongView(engine: engine, backToStack: { showSong = false })
         } else {
           TransportView(engine: engine, openSong: { showSong = true })
-          InstrumentView(engine: engine)
-          LayersView(engine: engine)
-          DrumsView(engine: engine)
-          MixView(engine: engine)
+          InstrumentView(engine: engine).id("keys")
+          LayersView(engine: engine).id("loops")
+          DrumsView(engine: engine).id("drums")
+          MixView(engine: engine).id("mix")
           SessionView(engine: engine, share: { SharePresenter.present($0) })
           exportRow
         }
@@ -43,6 +50,12 @@ struct StudioView: View {
       .padding(.horizontal, 16)
       .padding(.top, 12)
       .padding(.bottom, 40)
+    }
+    #if DEBUG
+    // The demo sets its scene as it opens the studio, so apply it on appear too.
+    .onAppear { showDemo(engine.demoScene, proxy) }
+    .onChange(of: engine.demoScene) { showDemo($0, proxy) }
+    #endif
     }
   }
 
@@ -57,6 +70,20 @@ struct StudioView: View {
         .foregroundStyle(LS.fg)
     }
   }
+
+  #if DEBUG
+  private func showDemo(_ scene: String?, _ proxy: ScrollViewProxy) {
+    guard let scene else { return }
+    showSong = scene == "song"
+    let target: [String: String] = [
+      "keys": "keys", "chords": "keys", "synth": "synthpanel", "loops": "loops", "reverse": "loops",
+      "drums": "drums", "neon": "drums", "mix": "mix",
+    ]
+    if let id = target[scene] {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { proxy.scrollTo(id, anchor: .top) }
+    }
+  }
+  #endif
 
   /// Stack | Song. Both keep their state; switching only changes what's on screen.
   private var modeSwitch: some View {
@@ -493,6 +520,10 @@ struct InstrumentView: View {
 
   private var synthDisclosure: some View {
     VStack(alignment: .leading, spacing: 12) {
+      #if DEBUG
+      Color.clear.frame(height: 0).id("synthpanel")
+        .onAppear { if engine.demoScene == "synth" { synthOpen = true } }
+      #endif
       Button {
         withAnimation(.easeInOut(duration: 0.18)) { synthOpen.toggle() }
       } label: {

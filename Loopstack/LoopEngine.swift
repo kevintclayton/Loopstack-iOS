@@ -1637,6 +1637,126 @@ final class LoopEngine: ObservableObject {
     }
   }
 
+  #if DEBUG
+  // MARK: Screenshot demo (debug builds only)
+
+  /// Which part of the app the demo shows (the view scrolls to it).
+  @Published var demoScene: String?
+
+  /// Fills the app with a believable session for screenshots: three loops, drums with
+  /// tape, a latched arp, and a song. Launch with `-demo stack|keys|loops|drums|song`.
+  /// Nothing is saved.
+  func loadDemo(_ scene: String) {
+    if !unlocked { unlock() }
+    bpm = 86
+    bars = 4
+    let sr = format.sampleRate
+    let n = max(1, Int((loopDuration * sr).rounded()))
+    for k in 0..<3 where layerSlots.indices.contains(k) {
+      let slot = layerSlots[k]
+      slot.busy = true
+      let take = Self.demoTake(k, frames: n, sampleRate: sr, bpm: Double(bpm))
+      liveLayers.debugInstall(index: slot.index, l: take, r: take)
+      commitLayer(slot: slot, name: "Loop \(k + 1)", index: slot.index, live: liveLayers, sampleRate: sr)
+    }
+    layerSerial = 4
+    loopLocked = true
+    if layers.count == 3 {
+      setLayerDelay(layers[0].id, 0.3)
+      setLayerReverb(layers[0].id, 0.35)
+      setLayerDrive(layers[1].id, 0.4)
+      toggleHalfSpeed(layers[2].id)
+      setLayerReverb(layers[2].id, 0.55)
+    }
+    setDrumsOn(true)
+    setDrumKit(.dusty)
+    setDrumId("hazy")
+    setDrumTape(0.45)
+    setDrumWear(0.3)
+    setDrumComp(0.6)
+    setPreset(.keys)
+    setInstrumentTape(0.4)
+    setInstrumentWear(0.25)
+    setArpOn(true)
+    setArpLatch(true)
+    setArpOctaves(2)
+    for note in padNotes.prefix(8).enumerated().filter({ [0, 2, 4, 7].contains($0.offset) }).map(\.element.midi) {
+      pressNote(note)
+      releaseNote(note)
+    }
+    let one = loopDuration
+    songBlocks = [
+      SongBlock(id: "demo1", name: "Block 1", bpm: 86, bars: 4, frames: Int(one * sr), sampleRate: sr, repeats: 2, detail: "Dusty · Hazy · 2 loops"),
+      SongBlock(id: "demo2", name: "Block 2", bpm: 86, bars: 4, frames: Int(one * sr), sampleRate: sr, repeats: 4, detail: "Dusty · Hazy · 3 loops"),
+      SongBlock(id: "demo3", name: "Block 3", bpm: 86, bars: 4, frames: Int(one * sr), sampleRate: sr, repeats: 2, detail: "Neon · Cassette · 3 loops"),
+      SongBlock(id: "demo4", name: "Block 4", bpm: 86, bars: 4, frames: Int(one * sr), sampleRate: sr, repeats: 1, detail: "No drums · 1 loop"),
+    ]
+    // Scene variations.
+    switch scene {
+    case "chords":
+      setArpOn(false)
+      setChordMode(true)
+      setChordSevenths(true)
+    case "synth":
+      setArpOn(false)
+      setPreset(.bass)
+      setInstrumentFM(0.62)
+    case "reverse":
+      if layers.count == 3 {
+        toggleReverse(layers[1].id)
+        toggleMute(layers[2].id)
+      }
+    case "neon":
+      setDrumKit(.neon)
+      setDrumId("floor")
+      setJam(true)
+      setDrumTape(0)
+      setDrumWear(0)
+      setDrumPitch(-2)
+    default:
+      break
+    }
+    if scene == "song" {
+      // Shown mid-song (the timeline and playhead), without scheduling real audio.
+      songPlaying = true
+      songStartedAt = CACurrentMediaTime() - one * 3.4
+    } else {
+      play()
+    }
+    demoScene = scene
+  }
+
+  /// A loop's worth of believable audio for the waveforms: chords, a bass line, or a
+  /// plucked sixteenth pattern, with decaying notes on the beat grid.
+  private static func demoTake(_ kind: Int, frames n: Int, sampleRate sr: Double, bpm: Double) -> [Float] {
+    var out = [Float](repeating: 0, count: n)
+    let beat = 60 / bpm
+    func note(at t0: Double, hz: Double, len: Double, amp: Double, decay: Double) {
+      let a = Int(t0 * sr), m = Int(len * sr)
+      for i in 0..<m where a + i < n {
+        let t = Double(i) / sr
+        let env = min(1, t / 0.004) * exp(-t / decay)
+        out[a + i] += Float(amp * env * (sin(2 * .pi * hz * t) + 0.3 * sin(4 * .pi * hz * t)))
+      }
+    }
+    switch kind {
+    case 0:  // chords on each bar
+      let chords: [[Double]] = [[220, 277, 330], [196, 247, 294], [175, 220, 262], [196, 247, 311]]
+      for bar in 0..<4 { for hz in chords[bar] { note(at: Double(bar) * 4 * beat, hz: hz, len: 4 * beat, amp: 0.16, decay: 1.6) } }
+      for bar in 0..<4 { for hz in chords[bar] { note(at: (Double(bar) * 4 + 2.5) * beat, hz: hz * 2, len: beat, amp: 0.07, decay: 0.3) } }
+    case 1:  // bass
+      let line: [(Double, Double)] = [(0, 55), (1.5, 55), (3, 82), (4, 49), (5.5, 49), (7, 73), (8, 44), (9.5, 44), (11, 65), (12, 49), (13.5, 62), (15, 73)]
+      for (b, hz) in line { note(at: b * beat, hz: hz, len: beat * 1.4, amp: 0.45, decay: 0.35) }
+    default:  // plucked sixteenths
+      let scale: [Double] = [440, 523, 659, 587, 523, 440, 392, 494]
+      for s in 0..<64 where s % 3 != 2 {
+        note(at: Double(s) * beat / 4, hz: scale[s % scale.count], len: beat / 2, amp: 0.12 + 0.1 * Double(s % 4 == 0 ? 1 : 0), decay: 0.09)
+      }
+    }
+    return out
+  }
+  #endif
+
   // MARK: Song mode
 
   /// Captures one full cycle of the stack as it sounds now and adds it to the song.

@@ -196,7 +196,7 @@ enum DrumLibrary {
       .init(step: 4, voice: .clap, vel: 0.4),
       .init(step: 12, voice: .clap, vel: 0.55),
     ]),
-    DrumPattern(id: "dilla", name: "Late Pocket", feel: "Drunk swing", bars: 1, swing: 0.28, hits: [
+    DrumPattern(id: "late", name: "Late Pocket", feel: "Drunk swing", bars: 1, swing: 0.28, hits: [
       .init(step: 0, voice: .kick, vel: 1),
       .init(step: 5, voice: .kick, vel: 0.55),
       .init(step: 11, voice: .kick, vel: 0.8),
@@ -804,7 +804,7 @@ enum Jam {
   /// Grooves that can follow each other without the song lurching style.
   private static let families: [[String]] = [
     ["floor", "techno", "acid", "industrial"],
-    ["pocket", "boombap", "dilla", "brush", "shuffle"],
+    ["pocket", "boombap", "late", "brush", "shuffle"],
     ["break", "dnb", "garage", "wrecked"],
     ["halftime", "trap", "footwork"],
     ["clave", "world", "dembow"],
