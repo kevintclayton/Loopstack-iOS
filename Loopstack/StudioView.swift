@@ -409,6 +409,8 @@ struct InstrumentView: View {
             .foregroundStyle(LS.subtle)
           Text("Sound & pads")
             .font(.system(size: 18, weight: .semibold))
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
             .foregroundStyle(LS.fg)
         }
         Spacer()
@@ -1347,6 +1349,8 @@ private func pill(_ title: String, on: Bool, disabled: Bool = false, action: @es
   Button(action: action) {
     Text(title)
       .font(.system(size: 13, weight: .medium))
+      .lineLimit(1)
+      .fixedSize()  // a pill never wraps ("Sampler" broke onto two lines on 6.9" phones)
       .foregroundStyle(on ? LS.bg : LS.muted)
       .padding(.horizontal, 12)
       .frame(height: 36)
