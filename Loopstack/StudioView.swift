@@ -365,10 +365,11 @@ struct LayersView: View {
               }
             }
             PeakView(
-              // Shows what's playing: mirrored for Rev, and a half-speed loop's playhead
-              // crosses it over two cycles.
-              peaks: layer.reversed ? Array(layer.peaks.reversed()) : layer.peaks,
-              position: engine.displayPosition(for: layer),
+              // The waveform as recorded; with Rev the playhead runs backwards over it
+              // (reversed playback is at the mirrored point), and a half-speed loop's
+              // playhead crosses it over two cycles.
+              peaks: layer.peaks,
+              position: layer.reversed ? 1 - engine.displayPosition(for: layer) : engine.displayPosition(for: layer),
               running: engine.running,
               muted: engine.isSilenced(layer),
               recording: engine.recording && index == engine.layers.count - 1
