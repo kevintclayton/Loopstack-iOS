@@ -31,15 +31,24 @@ struct StudioView: View {
     #endif
   }
 
-  @ViewBuilder private var desk: some View {
-    if sizeClass == .regular {
-      IPadDesk(engine: engine, showSong: $showSong, header: header, modeSwitch: modeSwitch, exportRow: exportRow)
-        #if DEBUG
-        .onAppear { if engine.demoScene == "song" { showSong = true } }
-        .onChange(of: engine.demoScene) { showSong = $0 == "song" }
-        #endif
-    } else {
-      phoneDesk
+  /// Two columns need about 900 points: every iPad in landscape, the 13" in portrait.
+  /// Narrower (smaller iPads upright, Split View) gets the single column; on iPad it's
+  /// centred at a comfortable width.
+  private static let twoColumnWidth: CGFloat = 900
+
+  private var desk: some View {
+    GeometryReader { geo in
+      if sizeClass == .regular && geo.size.width >= Self.twoColumnWidth {
+        IPadDesk(engine: engine, showSong: $showSong, header: header, modeSwitch: modeSwitch, exportRow: exportRow)
+          #if DEBUG
+          .onAppear { if engine.demoScene == "song" { showSong = true } }
+          .onChange(of: engine.demoScene) { showSong = $0 == "song" }
+          #endif
+      } else {
+        phoneDesk
+          .frame(maxWidth: sizeClass == .regular ? 720 : .infinity)
+          .frame(maxWidth: .infinity)
+      }
     }
   }
 
