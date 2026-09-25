@@ -334,7 +334,8 @@ struct TransportView: View {
           Text(engine.sendingToSong ? "Sending one pass… \(Int(engine.sendProgress * 100))%" : "Send to song")
         }
         .font(.system(size: 14, weight: .medium))
-        .foregroundStyle(engine.canSendToSong ? LS.fg : LS.subtle)
+        // Still readable when there's nothing to send yet, so it's easy to find.
+        .foregroundStyle(engine.canSendToSong ? LS.fg : LS.muted)
         .frame(maxWidth: .infinity, minHeight: 44)
         .background(
           GeometryReader { g in
@@ -351,6 +352,12 @@ struct TransportView: View {
       }
       .buttonStyle(.plain)
       .disabled(!engine.canSendToSong || engine.sendingToSong)
+      if !engine.canSendToSong {
+        Text("Record a loop or turn on drums, then send the stack to your song.")
+          .font(.system(size: 12))
+          .foregroundStyle(LS.subtle)
+          .multilineTextAlignment(.center)
+      }
       if let note = engine.sendNote {
         Button(action: openSong) {
           Text("\(note) · View song")
