@@ -65,7 +65,8 @@ enum MusicKey {
     var start = base
     while start > 0, ((start - r) % 12 + 12) % 12 != 0 { start -= 1 }
     if start < 24 { start += 12 }
-    let count = mode == .chromatic ? 12 : 16
+    // Chromatic: two full octaves (4 rows of 6), filling the same space as a scale's 16.
+    let count = mode == .chromatic ? 24 : 16
     var notes: [PadNote] = []
     var midi = start
     while notes.count < count {
