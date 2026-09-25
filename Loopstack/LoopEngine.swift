@@ -582,6 +582,8 @@ final class LoopEngine: ObservableObject {
         guard let self, let raw, let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
         // Headphones unplugged: pause rather than suddenly play out of the speaker.
         if reason == .oldDeviceUnavailable, self.running { self.pause() }
+        // Mic monitoring follows the headphones in and out.
+        self.applyGains()
       }
     })
     lifecycleObservers.append(nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
@@ -797,7 +799,20 @@ final class LoopEngine: ObservableObject {
     drumsMixer.outputVolume = drumsOn ? drumsGain * Self.drumTrim : 0
     instMixer.outputVolume = instrumentGain
     instMixer.pan = instrumentPan
-    micMixer.outputVolume = ((monitorOn || sampleRecording) && micArmed) ? micGain * 0.7 : 0
+    // Hearing the mic only ever happens in headphones: through the built-in speaker the
+    // mic hears itself and howls. Capturing a sample records silently.
+    let phones = Self.privateOutput()
+    if phones != headphonesOn { headphonesOn = phones }
+    micMixer.outputVolume = (monitorOn && micArmed && phones) ? micGain * 0.7 : 0
+  }
+
+  /// Output is headphones or another private listening device (wired, Bluetooth, USB),
+  /// not the built-in speaker or receiver.
+  @Published var headphonesOn = false
+  private static func privateOutput() -> Bool {
+    let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+    guard !outputs.isEmpty else { return false }
+    return outputs.allSatisfy { $0.portType != .builtInSpeaker && $0.portType != .builtInReceiver }
   }
 
   private func applyInstrumentSpace() {

@@ -730,6 +730,11 @@ struct InstrumentView: View {
       Toggle("Monitor", isOn: Binding(get: { engine.monitorOn }, set: { engine.setMonitorOn($0) }))
         .tint(LS.accent)
         .foregroundStyle(LS.fg)
+      if engine.monitorOn && !engine.headphonesOn {
+        Text("Plug in headphones to hear yourself. On the speaker the mic would feed back.")
+          .font(.system(size: 12))
+          .foregroundStyle(LS.subtle)
+      }
     }
   }
 }
@@ -742,6 +747,33 @@ struct KeyPadView: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
+      // Pads first, right under the sound choices, so they're a short reach from
+      // Record; key, scale and arp settings follow.
+      LazyVGrid(
+        columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns),
+        spacing: 8
+      ) {
+        ForEach(engine.padNotes) { note in
+          let on = engine.heldNotes.contains(note.midi) || engine.latchedPads.contains(note.midi) || engine.midiHeld.contains(note.midi)
+          Text(engine.padLabel(note))
+            .font(.system(size: 16, weight: note.isRoot ? .semibold : .medium, design: .monospaced))
+            .minimumScaleFactor(0.7)
+            .lineLimit(1)
+            .foregroundStyle(on ? LS.bg : (note.isRoot ? LS.fg : LS.muted))
+            .frame(maxWidth: .infinity)
+            // Bigger pads on iPad, where there's room to play them with fingers spread.
+            .frame(height: sizeClass == .regular
+                   ? (engine.scaleMode == .chromatic ? 72 : 96)
+                   : (engine.scaleMode == .chromatic ? 52 : 64))
+            .background(
+              on ? LS.accent : (note.isRoot ? LS.surface2 : LS.bg),
+              in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
+            .contentShape(Rectangle())
+            .modifier(PadTouch(midi: note.midi, engine: engine))
+            .accessibilityLabel(note.label)
+        }
+      }
       HStack {
         Text("KEY")
           .font(.system(size: 11, weight: .medium))
@@ -817,31 +849,6 @@ struct KeyPadView: View {
                : "\(engine.latchedPads.count) pad\(engine.latchedPads.count == 1 ? "" : "s") in the pattern. Tap a lit pad to take it out.")
             .font(.system(size: 12))
             .foregroundStyle(LS.muted)
-        }
-      }
-      LazyVGrid(
-        columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns),
-        spacing: 8
-      ) {
-        ForEach(engine.padNotes) { note in
-          let on = engine.heldNotes.contains(note.midi) || engine.latchedPads.contains(note.midi) || engine.midiHeld.contains(note.midi)
-          Text(engine.padLabel(note))
-            .font(.system(size: 16, weight: note.isRoot ? .semibold : .medium, design: .monospaced))
-            .minimumScaleFactor(0.7)
-            .lineLimit(1)
-            .foregroundStyle(on ? LS.bg : (note.isRoot ? LS.fg : LS.muted))
-            .frame(maxWidth: .infinity)
-            // Bigger pads on iPad, where there's room to play them with fingers spread.
-            .frame(height: sizeClass == .regular
-                   ? (engine.scaleMode == .chromatic ? 72 : 96)
-                   : (engine.scaleMode == .chromatic ? 52 : 64))
-            .background(
-              on ? LS.accent : (note.isRoot ? LS.surface2 : LS.bg),
-              in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-            )
-            .contentShape(Rectangle())
-            .modifier(PadTouch(midi: note.midi, engine: engine))
-            .accessibilityLabel(note.label)
         }
       }
     }
