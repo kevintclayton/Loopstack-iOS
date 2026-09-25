@@ -33,14 +33,14 @@ struct IPadDesk<Header: View, ModeSwitch: View, ExportRow: View>: View {
         }
       } else {
         HStack(alignment: .top, spacing: 20) {
-          column {
+          column(side: "left") {
             TransportView(engine: engine, openSong: { showSong = true })
             InstrumentView(engine: engine)
           }
-          column {
+          column(side: "right") {
             LayersView(engine: engine)
-            DrumsView(engine: engine)
-            MixView(engine: engine)
+            DrumsView(engine: engine).id("drums")
+            MixView(engine: engine).id("mix")
             SessionView(engine: engine, share: { SharePresenter.present($0) })
             exportRow
             PrivacyView()
@@ -51,13 +51,31 @@ struct IPadDesk<Header: View, ModeSwitch: View, ExportRow: View>: View {
     }
   }
 
-  private func column<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 16) {
-        content()
+  private func column<Content: View>(side: String, @ViewBuilder _ content: () -> Content) -> some View {
+    let body = content()  // built here: the scroll reader's closure can't hold `content`
+    return ScrollViewReader { proxy in
+      ScrollView {
+        VStack(alignment: .leading, spacing: 16) {
+          body
+        }
+        .padding(.bottom, 40)
       }
-      .padding(.bottom, 40)
+      #if DEBUG
+      // Screenshot demo: scroll this column to the scene's part.
+      .onAppear { demoScroll(side, proxy) }
+      .onChange(of: engine.demoScene) { _ in demoScroll(side, proxy) }
+      #endif
     }
     .frame(maxWidth: .infinity)
   }
+
+  #if DEBUG
+  private func demoScroll(_ side: String, _ proxy: ScrollViewProxy) {
+    let targets: [String: (String, String)] = [
+      "synth": ("left", "synthpanel"), "drums": ("right", "drums"), "neon": ("right", "drums"), "mix": ("right", "mix"),
+    ]
+    guard let scene = engine.demoScene, let (col, id) = targets[scene], col == side else { return }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { proxy.scrollTo(id, anchor: .top) }
+  }
+  #endif
 }
