@@ -1648,12 +1648,17 @@ final class LoopEngine: ObservableObject {
     node.destination(forMixer: loopReverbBus, bus: slot.reverbBus)?.volume = min(1, max(0, reverb))
   }
 
+  /// When the last session take stopped: a second tap right after Stop (a double tap)
+  /// shouldn't start a new take.
+  private var sessionStoppedAt: TimeInterval = 0
+
   func startSessionRecord() {
     guard !sessionRecording else { return }
+    guard CACurrentMediaTime() - sessionStoppedAt > 1.0 else { return }
     sessionSink.start()
     sessionRecording = true
+    // The previous take (sessionURL) is kept until this one finishes with audio.
     sessionReady = false
-    sessionURL = nil
     sessionStarted = CACurrentMediaTime()
     sessionElapsed = 0
     // Tapping a node that isn't attached yet throws; the limiter joins in attachGraph.
@@ -1666,13 +1671,18 @@ final class LoopEngine: ObservableObject {
   func stopSessionRecord() {
     guard sessionRecording else { return }
     sessionRecording = false
+    sessionStoppedAt = CACurrentMediaTime()
     if sessionTapInstalled {
       masterLimiter.removeTap(onBus: 0)
       sessionTapInstalled = false
     }
     let pair = sessionSink.stop()
     let n = min(pair.l.count, pair.r.count)
-    guard n > 0 else { return }
+    guard n > 0 else {
+      // Nothing captured: the previous take is still there to save or share.
+      sessionReady = sessionURL != nil
+      return
+    }
     let buf = AudioDSP.makeBuffer(frames: n, sampleRate: format.sampleRate)
     let L = buf.floatChannelData![0]
     let R = buf.floatChannelData![1]
@@ -1681,8 +1691,12 @@ final class LoopEngine: ObservableObject {
       R[i] = pair.r[i]
     }
     let data = AudioDSP.encodeWav(buf)
-    let url = FileManager.default.temporaryDirectory.appendingPathComponent("loopstack-session.wav")
+    // Each take gets its own file, so a new take never overwrites the one being kept.
+    let stamp = DateFormatter()
+    stamp.dateFormat = "yyyy-MM-dd HH.mm.ss"
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("Loopstack Session \(stamp.string(from: Date())).wav")
     try? data.write(to: url)
+    if let old = sessionURL, old != url { try? FileManager.default.removeItem(at: old) }
     sessionURL = url
     sessionDuration = Double(n) / format.sampleRate
     sessionReady = true

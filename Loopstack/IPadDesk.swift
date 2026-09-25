@@ -58,6 +58,9 @@ struct IPadDesk<Header: View, ModeSwitch: View, ExportRow: View>: View {
         VStack(alignment: .leading, spacing: 16) {
           body
         }
+        // A gutter for the scroll bar, which iPad lets you grab: it sat over the Drums
+        // switch at the card's edge.
+        .padding(.trailing, 14)
         .padding(.bottom, 40)
       }
       #if DEBUG
