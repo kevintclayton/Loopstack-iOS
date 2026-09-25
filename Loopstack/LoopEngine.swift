@@ -1339,15 +1339,46 @@ final class LoopEngine: ObservableObject {
     )
   }
 
+  /// Velocity for notes played from a hardware keyboard (C / V change it, as in
+  /// GarageBand's musical typing).
+  private var typingVelocity: Float = 0.85
+
+  /// Hardware keyboard. Transport keys first (the ones every DAW uses), then musical
+  /// typing: A-row white keys, W-row black keys, Z/X octave, C/V velocity.
   func typingDown(_ raw: String) {
+    switch raw.lowercased() {
+    case " ":
+      play()  // play, or pause while running
+      return
+    case "r":
+      record()
+      return
+    case "\r":
+      stop()  // stop and back to the top
+      return
+    case "z":
+      setInstrumentOctave(instrumentOctave - 1)
+      return
+    case "x":
+      setInstrumentOctave(instrumentOctave + 1)
+      return
+    case "c":
+      typingVelocity = max(0.25, typingVelocity - 0.15)
+      return
+    case "v":
+      typingVelocity = min(1, typingVelocity + 0.15)
+      return
+    default:
+      break
+    }
     guard inputMode != "mic" else { return }
     if scaleMode != .chromatic, let midi = MusicKey.midiForTypeKey(raw, pads: padNotes) {
-      pressNote(midi)
+      pressNote(midi, velocity: typingVelocity)
       return
     }
     let key = raw.lowercased()
     guard let base = Self.typingKeys[key] else { return }
-    pressNote(base + instrumentOctave * 12)
+    pressNote(base + instrumentOctave * 12, velocity: typingVelocity)
   }
 
   func typingUp(_ raw: String) {

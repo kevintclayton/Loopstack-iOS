@@ -116,7 +116,9 @@ enum MusicKey {
   }
 
   /// Home-row mapping onto the visible pads.
-  static let typeOrder = ["a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'", "z", "x", "c", "v", "b"]
+  /// Hardware keys for the pads, low to high: the A row, then the top row (skipping R,
+  /// which records). Z/X and C/V are octave and velocity, as in GarageBand.
+  static let typeOrder = ["a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'", "w", "e", "t", "y", "u"]
 
   static func midiForTypeKey(_ raw: String, pads: [PadNote]) -> Int? {
     let key = raw.lowercased()
