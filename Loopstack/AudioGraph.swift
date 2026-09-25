@@ -229,12 +229,16 @@ final class TapeSim: @unchecked Sendable {
   private var rng = RTRandom()
   /// False only for measuring the rest of the chain without transport wobble.
   private let wobble: Bool
+  /// Level the makeup gain holds constant: the signal's typical level (keys ~0.15;
+  /// the drum bus runs hotter).
+  private let nominal: Float
   /// Per-channel block scratch. Raw memory (allocated once) so the block stages never
   /// overlap Swift's exclusive access to the channel state.
   private let scratch: [UnsafeMutablePointer<Float>]
 
-  init(wobble: Bool = true) {
+  init(wobble: Bool = true, nominal: Float = TapeSim.keysNominal) {
     self.wobble = wobble
+    self.nominal = nominal
     scratch = (0..<2).map { _ in
       let p = UnsafeMutablePointer<Float>.allocate(capacity: Oversampler2x.maxFrames)
       p.initialize(repeating: 0, count: Oversampler2x.maxFrames)
@@ -388,7 +392,7 @@ final class TapeSim: @unchecked Sendable {
     // Pre: (k s + w)/(s + w). Its exact inverse is a shelf cornered at w/k.
     let deemphA = Float(1 - exp(-2 * Double.pi * 3000 / Double(emphK) / sr))
     let bias: Float = 0.08 * a
-    let makeup: Float = Self.nominal / Self.curve(drive * Self.nominal, bias: 0)  // keep level ~constant
+    let makeup: Float = nominal / Self.curve(drive * nominal, bias: 0)  // keep level ~constant
     let wobbleAmt = wobble ? Double(a) : 0
     let wowDepth = 0.00055 * wobbleAmt * sr / (2 * Double.pi * 0.7)       // +/-0.055% pitch
     let flutterDepth = 0.00025 * wobbleAmt * sr / (2 * Double.pi * 7.1)   // +/-0.025% pitch
@@ -490,9 +494,16 @@ final class TapeSim: @unchecked Sendable {
     }
   }
 
-  /// Level the makeup gain holds constant (a typical keys level; measured to keep a
-  /// keys chord within ~0.6 dB across the whole control).
-  static let nominal: Float = 0.15
+  /// Keys level the makeup gain holds constant (measured to keep a keys chord within
+  /// ~0.6 dB across the whole control).
+  static let keysNominal: Float = 0.15
+
+  /// Render thread: how late the tape path currently plays (the wobble's base delay,
+  /// weighted by the on/off crossfade), in samples. The drums read ahead by this so
+  /// the beat stays on the grid.
+  var latency: Double { Double(engaged) * (base + Self.pathLatency) }
+  /// The saturator's oversampling filters, in base-rate samples (measured: 0.73 ms at 48 kHz).
+  static let pathLatency = 35.0
 
 
 
@@ -649,10 +660,14 @@ enum AudioGraph {
     }
   }
 
-  static func drumsNode(format: AVAudioFormat, drums: LiveDrums) -> AVAudioSourceNode {
+  static func drumsNode(format: AVAudioFormat, drums: LiveDrums, tape: TapeSim) -> AVAudioSourceNode {
     let drums = drums
+    let tape = tape
+    let sr = format.sampleRate
     return AVAudioSourceNode(format: format) { _, ts, frameCount, abl -> OSStatus in
-      drums.render(frames: Int(frameCount), list: abl, timestamp: ts)
+      // Read the beat early by the tape's delay, so through the tape it lands on the grid.
+      drums.render(frames: Int(frameCount), list: abl, timestamp: ts, ahead: tape.latency / sr)
+      tape.process(abl, frames: Int(frameCount))
       return noErr
     }
   }

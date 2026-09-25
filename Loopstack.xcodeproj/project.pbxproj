@@ -11,6 +11,12 @@
 		BB0000000000000000000014 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000114 /* Assets.xcassets */; };
 		BB0000000000000000000018 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000119 /* PrivacyInfo.xcprivacy */; };
 		BB000000000000000000001A /* Samples in Resources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000012A /* Samples */; };
+		BB0000000000000000000026 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000126 /* AVFoundation.framework */; };
+		BB0000000000000000000150 /* DrumLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000120 /* DrumLibrary.swift */; };
+		BB0000000000000000000151 /* AudioDSP.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000121 /* AudioDSP.swift */; };
+		BB0000000000000000000152 /* LoopEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000122 /* LoopEngine.swift */; };
+		BB0000000000000000000153 /* StudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000123 /* StudioView.swift */; };
+		BB0000000000000000000155 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000125 /* Theme.swift */; };
 		BB0000000000000000000156 /* AcousticKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000012B /* AcousticKit.swift */; };
 		BB0000000000000000000157 /* MusicKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000012C /* MusicKey.swift */; };
 		BB0000000000000000000158 /* LiveSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000012D /* LiveSampler.swift */; };
@@ -18,12 +24,7 @@
 		BB000000000000000000015A /* LiveLayers.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000012F /* LiveLayers.swift */; };
 		BB000000000000000000015B /* LiveMetro.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000130 /* LiveMetro.swift */; };
 		BB000000000000000000015C /* AudioGraph.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000131 /* AudioGraph.swift */; };
-		BB0000000000000000000026 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000126 /* AVFoundation.framework */; };
-		BB0000000000000000000150 /* DrumLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000120 /* DrumLibrary.swift */; };
-		BB0000000000000000000151 /* AudioDSP.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000121 /* AudioDSP.swift */; };
-		BB0000000000000000000152 /* LoopEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000122 /* LoopEngine.swift */; };
-		BB0000000000000000000153 /* StudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000123 /* StudioView.swift */; };
-		BB0000000000000000000155 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000125 /* Theme.swift */; };
+		BB0000000000000000000210 /* Song.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000200 /* Song.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -46,6 +47,7 @@
 		BB000000000000000000012F /* LiveLayers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveLayers.swift; sourceTree = "<group>"; };
 		BB0000000000000000000130 /* LiveMetro.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveMetro.swift; sourceTree = "<group>"; };
 		BB0000000000000000000131 /* AudioGraph.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioGraph.swift; sourceTree = "<group>"; };
+		BB0000000000000000000200 /* Song.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Song.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -83,6 +85,7 @@
 				BB000000000000000000012E /* SoundLibrary.swift */,
 				BB000000000000000000012F /* LiveLayers.swift */,
 				BB0000000000000000000130 /* LiveMetro.swift */,
+				BB0000000000000000000200 /* Song.swift */,
 				BB0000000000000000000131 /* AudioGraph.swift */,
 				BB000000000000000000012A /* Samples */,
 				BB0000000000000000000125 /* Theme.swift */,
@@ -186,6 +189,7 @@
 				BB0000000000000000000159 /* SoundLibrary.swift in Sources */,
 				BB000000000000000000015A /* LiveLayers.swift in Sources */,
 				BB000000000000000000015B /* LiveMetro.swift in Sources */,
+				BB0000000000000000000210 /* Song.swift in Sources */,
 				BB000000000000000000015C /* AudioGraph.swift in Sources */,
 				BB0000000000000000000155 /* Theme.swift in Sources */,
 			);
@@ -237,9 +241,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Loopstack/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Loopstack;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Loopstack uses the microphone to record audio into your loops and to capture samples for the sampler. Audio stays on your device unless you share it.";
-				INFOPLIST_KEY_UILaunchScreen_Generation = NO;
 				INFOPLIST_KEY_UIRequiresFullScreen = YES;
 				INFOPLIST_KEY_UIStatusBarStyle = UIStatusBarStyleLightContent;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -253,8 +257,8 @@
 				PRODUCT_NAME = Loopstack;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
-				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -271,9 +275,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Loopstack/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Loopstack;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Loopstack uses the microphone to record audio into your loops and to capture samples for the sampler. Audio stays on your device unless you share it.";
-				INFOPLIST_KEY_UILaunchScreen_Generation = NO;
 				INFOPLIST_KEY_UIRequiresFullScreen = YES;
 				INFOPLIST_KEY_UIStatusBarStyle = UIStatusBarStyleLightContent;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -287,8 +291,8 @@
 				PRODUCT_NAME = Loopstack;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
-				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};

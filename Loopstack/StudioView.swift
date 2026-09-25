@@ -3,6 +3,8 @@ import UIKit
 
 struct StudioView: View {
   @StateObject private var engine = LoopEngine()
+  /// Stack (the live loopstack) or Song (the arranged blocks).
+  @State private var showSong = false
 
   var body: some View {
     ZStack {
@@ -24,13 +26,18 @@ struct StudioView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 16) {
         header
-        TransportView(engine: engine)
-        InstrumentView(engine: engine)
-        LayersView(engine: engine)
-        DrumsView(engine: engine)
-        MixView(engine: engine)
-        SessionView(engine: engine, share: { SharePresenter.present($0) })
-        exportRow
+        modeSwitch
+        if showSong {
+          SongView(engine: engine, backToStack: { showSong = false })
+        } else {
+          TransportView(engine: engine, openSong: { showSong = true })
+          InstrumentView(engine: engine)
+          LayersView(engine: engine)
+          DrumsView(engine: engine)
+          MixView(engine: engine)
+          SessionView(engine: engine, share: { SharePresenter.present($0) })
+          exportRow
+        }
         PrivacyView()
       }
       .padding(.horizontal, 16)
@@ -48,6 +55,20 @@ struct StudioView: View {
       Text("Loopstack")
         .font(.system(size: 32, weight: .semibold))
         .foregroundStyle(LS.fg)
+    }
+  }
+
+  /// Stack | Song. Both keep their state; switching only changes what's on screen.
+  private var modeSwitch: some View {
+    HStack(spacing: 6) {
+      pill("Stack", on: !showSong) { showSong = false }
+      pill(engine.songBlocks.isEmpty ? "Song" : "Song · \(engine.songBlocks.count)", on: showSong) { showSong = true }
+      Spacer()
+      if engine.songPlaying && !showSong {
+        Text("Song playing")
+          .font(.system(size: 12, design: .monospaced))
+          .foregroundStyle(LS.accent)
+      }
     }
   }
 
@@ -129,6 +150,7 @@ struct LoopstackMark: View {
 
 struct TransportView: View {
   @ObservedObject var engine: LoopEngine
+  var openSong: () -> Void = {}
   @State private var taps: [TimeInterval] = []
 
   var body: some View {
@@ -210,6 +232,8 @@ struct TransportView: View {
         Spacer()
       }
 
+      sendToSongRow
+
       VStack(alignment: .leading, spacing: 8) {
         Text("LENGTH")
           .font(.system(size: 11, weight: .medium))
@@ -244,6 +268,44 @@ struct TransportView: View {
             .font(.system(size: 13, weight: .medium))
             .foregroundStyle(LS.muted)
         }
+      }
+    }
+  }
+
+  /// Send to song: captures one full pass of the stack (loops, effects, mutes, solos,
+  /// drums) and adds it to the song as a block.
+  private var sendToSongRow: some View {
+    VStack(spacing: 6) {
+      Button { engine.sendToSong() } label: {
+        HStack(spacing: 8) {
+          Image(systemName: "rectangle.stack.badge.plus")
+          Text(engine.sendingToSong ? "Sending one pass… \(Int(engine.sendProgress * 100))%" : "Send to song")
+        }
+        .font(.system(size: 14, weight: .medium))
+        .foregroundStyle(engine.canSendToSong ? LS.fg : LS.subtle)
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .background(
+          GeometryReader { g in
+            ZStack(alignment: .leading) {
+              Capsule().fill(LS.surface2)
+              if engine.sendingToSong {
+                Capsule().fill(LS.accent.opacity(0.35))
+                  .frame(width: g.size.width * CGFloat(engine.sendProgress))
+              }
+            }
+          }
+        )
+        .clipShape(Capsule())
+      }
+      .buttonStyle(.plain)
+      .disabled(!engine.canSendToSong || engine.sendingToSong)
+      if let note = engine.sendNote {
+        Button(action: openSong) {
+          Text("\(note) · View song")
+            .font(.system(size: 12))
+            .foregroundStyle(LS.accent)
+        }
+        .buttonStyle(.plain)
       }
     }
   }
@@ -783,9 +845,11 @@ struct DrumsView: View {
           .labelsHidden()
           .tint(LS.accent)
       }
-      HStack(spacing: 6) {
-        ForEach(DrumKit.allCases) { kit in
-          pill(kit.label, on: engine.drumKit == kit) { engine.setDrumKit(kit) }
+      ScrollView(.horizontal, showsIndicators: false) {
+        HStack(spacing: 6) {
+          ForEach(DrumKit.allCases) { kit in
+            pill(kit.label, on: engine.drumKit == kit) { engine.setDrumKit(kit) }
+          }
         }
       }
       Text(
@@ -808,6 +872,12 @@ struct DrumsView: View {
         FxRow(label: "Dirt", value: engine.drumDirt, display: "\(Int(engine.drumDirt * 100))", onChange: engine.setDrumDirt)
         FxRow(label: "Vinyl", value: engine.drumVinyl, display: "\(Int(engine.drumVinyl * 100))", onChange: engine.setDrumVinyl)
         FxRow(label: "Room", value: engine.drumRoom, display: "\(Int(engine.drumRoom * 100))", onChange: engine.setDrumRoom)
+        FxRow(label: "Tape", value: engine.drumTape, display: "\(Int(engine.drumTape * 100))", onChange: engine.setDrumTape)
+        FxRow(label: "Wear", value: engine.drumWear, display: "\(Int(engine.drumWear * 100))", onChange: engine.setDrumWear)
+        FxRow(label: "Pitch", value: Float(engine.drumPitch + 12) / 24,
+              display: engine.drumPitch == 0 ? "0" : String(format: "%+d", engine.drumPitch)) { v in
+          engine.setDrumPitch(Int((v * 24).rounded()) - 12)
+        }
       }
     }
   }
@@ -927,6 +997,176 @@ struct PrivacyView: View {
         .background(LS.surface, in: RoundedRectangle(cornerRadius: 16))
       }
     }
+  }
+}
+
+/// The song: blocks sent from the stack, played in order. Each block plays its captured
+/// pass `repeats` times.
+struct SongView: View {
+  @ObservedObject var engine: LoopEngine
+  var backToStack: () -> Void
+
+  var body: some View {
+    card {
+      HStack {
+        VStack(alignment: .leading, spacing: 4) {
+          Text("SONG")
+            .font(.system(size: 11, weight: .medium))
+            .tracking(2)
+            .foregroundStyle(LS.subtle)
+          Text(engine.songBlocks.isEmpty ? "No blocks yet" : "\(engine.songBlocks.count) block\(engine.songBlocks.count == 1 ? "" : "s") · \(time(engine.songLength))")
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundStyle(LS.fg)
+        }
+        Spacer()
+        Button { engine.toggleSong() } label: {
+          Image(systemName: engine.songPlaying ? "stop.fill" : "play.fill")
+            .foregroundStyle(LS.bg)
+            .frame(width: 52, height: 52)
+            .background(LS.fg, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(engine.songBlocks.isEmpty)
+        .opacity(engine.songBlocks.isEmpty ? 0.4 : 1)
+        .accessibilityLabel(engine.songPlaying ? "Stop song" : "Play song")
+      }
+      if engine.songBlocks.isEmpty {
+        Text("Build a loopstack, then press Send to song under the transport. Each send adds one full pass of the stack, exactly as it sounds, as a block here.")
+          .font(.system(size: 14))
+          .foregroundStyle(LS.muted)
+      } else {
+        timeline
+        if engine.songPlaying {
+          Text("\(time(engine.songPosition)) / \(time(engine.songLength))")
+            .font(.system(size: 12, design: .monospaced))
+            .foregroundStyle(LS.muted)
+        }
+        VStack(spacing: 0) {
+          ForEach(Array(engine.songBlocks.enumerated()), id: \.element.id) { index, block in
+            blockRow(block, index: index)
+            if index < engine.songBlocks.count - 1 { Divider().overlay(LS.surface2) }
+          }
+        }
+      }
+      HStack {
+        Button(action: backToStack) {
+          Label("Back to stack", systemImage: "chevron.left")
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(LS.fg)
+            .frame(minHeight: 44)
+        }
+        .buttonStyle(.plain)
+        Spacer()
+        Button {
+          if let url = engine.exportSong() { SharePresenter.present(url) }
+        } label: {
+          Label("Export song", systemImage: "square.and.arrow.up")
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(engine.songBlocks.isEmpty ? LS.subtle : LS.fg)
+            .frame(minHeight: 44)
+        }
+        .buttonStyle(.plain)
+        .disabled(engine.songBlocks.isEmpty)
+      }
+    }
+  }
+
+  /// Blocks side by side, sized by how long they play, with the playhead.
+  private var timeline: some View {
+    GeometryReader { geo in
+      let total = max(engine.songLength, 0.001)
+      let gap: CGFloat = 3
+      let usable = geo.size.width - gap * CGFloat(max(0, engine.songBlocks.count - 1))
+      ZStack(alignment: .leading) {
+        HStack(spacing: gap) {
+          ForEach(engine.songBlocks) { b in
+            let w = usable * CGFloat(b.seconds * Double(b.repeats) / total)
+            RoundedRectangle(cornerRadius: 4)
+              .fill(isCurrent(b) ? LS.accent.opacity(0.8) : LS.surface2)
+              .overlay(
+                Text(b.repeats > 1 ? "\(short(b))×\(b.repeats)" : short(b))
+                  .font(.system(size: 10, weight: .medium, design: .monospaced))
+                  .foregroundStyle(isCurrent(b) ? LS.bg : LS.muted)
+                  .lineLimit(1)
+                  .minimumScaleFactor(0.5)
+                  .padding(.horizontal, 2)
+              )
+              .frame(width: max(2, w))
+          }
+        }
+        if engine.songPlaying {
+          Rectangle()
+            .fill(LS.fg)
+            .frame(width: 2)
+            .offset(x: geo.size.width * CGFloat(engine.songPosition / total) - 1)
+        }
+      }
+    }
+    .frame(height: 36)
+  }
+
+  private func blockRow(_ b: SongBlock, index: Int) -> some View {
+    VStack(alignment: .leading, spacing: 4) {
+      HStack {
+        VStack(alignment: .leading, spacing: 2) {
+          Text(b.name)
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(isCurrent(b) ? LS.accent : LS.fg)
+          Text("\(b.bars) bar\(b.bars == 1 ? "" : "s") · \(b.bpm) bpm · \(b.detail)")
+            .font(.system(size: 12))
+            .foregroundStyle(LS.muted)
+            .lineLimit(1)
+        }
+        Spacer()
+        HStack(spacing: 0) {
+          songButton("minus") { engine.setRepeats(b.id, b.repeats - 1) }
+          Text("×\(b.repeats)")
+            .font(.system(size: 14, weight: .medium, design: .monospaced))
+            .foregroundStyle(LS.fg)
+            .frame(minWidth: 34)
+          songButton("plus") { engine.setRepeats(b.id, b.repeats + 1) }
+        }
+      }
+      HStack(spacing: 0) {
+        songButton("arrow.up", disabled: index == 0) { engine.moveBlock(b.id, by: -1) }
+        songButton("arrow.down", disabled: index == engine.songBlocks.count - 1) { engine.moveBlock(b.id, by: 1) }
+        songButton("plus.square.on.square") { engine.duplicateBlock(b.id) }
+        Spacer()
+        songButton("trash", color: LS.record) { engine.deleteBlock(b.id) }
+      }
+    }
+    .padding(.vertical, 8)
+  }
+
+  private func songButton(_ icon: String, disabled: Bool = false, color: Color? = nil, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      Image(systemName: icon)
+        .font(.system(size: 14, weight: .medium))
+        .foregroundStyle(disabled ? LS.subtle.opacity(0.4) : (color ?? LS.muted))
+        .frame(minWidth: 44, minHeight: 44)
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .disabled(disabled)
+  }
+
+  /// The block under the playhead.
+  private func isCurrent(_ b: SongBlock) -> Bool {
+    guard engine.songPlaying else { return false }
+    var t = 0.0
+    for x in engine.songBlocks {
+      let len = x.seconds * Double(x.repeats)
+      if engine.songPosition < t + len { return x.id == b.id }
+      t += len
+    }
+    return false
+  }
+
+  private func short(_ b: SongBlock) -> String { b.name.replacingOccurrences(of: "Block ", with: "") }
+
+  private func time(_ s: Double) -> String {
+    let t = Int(s.rounded())
+    return String(format: "%d:%02d", t / 60, t % 60)
   }
 }
 

@@ -1,6 +1,35 @@
 import AVFoundation
 import Foundation
 
+/// Which set of recorded one-shots a sample kit plays. All VCSL (CC0).
+enum SampleKit: String, CaseIterable {
+  /// The original kit: Bass Drum 1, Snare Modern 1, low tom.
+  case acoustic
+  /// A second kit: muted concert bass drum, Snare Modern 2 with cross-stick, high tom,
+  /// single claps, tambourine.
+  case studio
+  /// Hand percussion: cajon bass and slap, shaker, tambourine, congas, bongo, claps.
+  case hand
+
+  /// Clean gain after the kit limiter so a whole pattern sits as loud as the acoustic
+  /// kit. (Driving the limiter harder instead squashed the kick and shifted the balance.)
+  var postGain: Float {
+    switch self {
+    case .acoustic: return 1
+    case .studio: return 1.2   // +1.6 dB
+    case .hand: return 1.4     // +2.9 dB
+    }
+  }
+
+  var folder: String {
+    switch self {
+    case .acoustic: return "Samples/Acoustic"
+    case .studio: return "Samples/Studio"
+    case .hand: return "Samples/Hand"
+    }
+  }
+}
+
 /// Velocity-layered VCSL one-shots. Layer pick + residual gain + tone + length;
 /// velocity is timbre, not a volume knob on one sample.
 enum AcousticKit {
@@ -9,68 +38,75 @@ enum AcousticKit {
     var takes: [AVAudioPCMBuffer]
   }
 
-  private static var banks: [DrumVoice: [Layer]] = [:]
-  private static var rr: [DrumVoice: Int] = [:]
-  private static var loaded = false
+  private static var banks: [SampleKit: [DrumVoice: [Layer]]] = [:]
+  private static var rr: [SampleKit: [DrumVoice: Int]] = [:]
+  private static var loaded: Set<SampleKit> = []
   private static let lock = NSLock()
 
-  static var isLoaded: Bool {
+  static var isLoaded: Bool { isLoaded(.acoustic) }
+
+  static func isLoaded(_ kit: SampleKit) -> Bool {
     lock.lock()
     defer { lock.unlock() }
-    return loaded
+    return loaded.contains(kit)
   }
 
-  static func load() {
-    lock.lock()
-    if loaded {
-      lock.unlock()
-      return
+  /// Velocity layers per voice: (velocity it sits at, round-robin takes).
+  private static func specs(_ kit: SampleKit) -> [DrumVoice: [(Float, [String])]] {
+    switch kit {
+    case .acoustic:
+      return [
+        .kick: [(0.28, ["kick_v2"]), (0.68, ["kick_v5"]), (1.00, ["kick_v7"])],
+        .snare: [(0.35, ["snare_v3"]), (0.68, ["snare_v5", "snare_v5b"]), (1.00, ["snare_v7"])],
+        .hat: [(0.30, ["hat_v1"]), (0.62, ["hat_v3"]), (1.00, ["hat_v4"])],
+        .ohat: [(1.00, ["ohat"])],
+        .clap: [(0.48, ["clap_a", "clap_b"]), (1.00, ["clap_c", "clap_b"])],
+        .rim: [(0.45, ["rim_a"]), (1.00, ["rim_b"])],
+        .tom: [(0.45, ["tom_v2"]), (1.00, ["tom_v4"])],
+        // No perc samples: the kit's perc is the synthesised shaker (these were a cowbell).
+      ]
+    case .studio:
+      return [
+        .kick: [(0.25, ["kick_v1"]), (0.55, ["kick_v2", "kick_v2b"]), (0.8, ["kick_v3"]), (1.00, ["kick_v4", "kick_v4b"])],
+        .snare: [(0.25, ["snare_v2"]), (0.5, ["snare_v3", "snare_v3b"]), (0.75, ["snare_v4"]), (1.00, ["snare_v5", "snare_v5b"])],
+        .hat: [(0.25, ["hat_v1"]), (0.5, ["hat_v2"]), (0.75, ["hat_v3"]), (1.00, ["hat_v4"])],
+        .ohat: [(1.00, ["ohat", "ohat_b"])],
+        .clap: [(0.3, ["clap_a"]), (0.55, ["clap_b"]), (0.8, ["clap_d"]), (1.00, ["clap_c"])],
+        .rim: [(1.00, ["rim_a", "rim_b"])],
+        .tom: [(0.35, ["tom_v2"]), (0.7, ["tom_v3"]), (1.00, ["tom_v4"])],
+        .perc: [(0.5, ["perc_v1"]), (1.00, ["perc_v2"])],
+      ]
+    case .hand:
+      return [
+        .kick: [(0.3, ["kick_v1"]), (0.65, ["kick_v2", "kick_v2b"]), (1.00, ["kick_v3", "kick_v3b"])],
+        .snare: [(0.35, ["snare_v1", "snare_v1b"]), (0.7, ["snare_v2", "snare_v2b"]), (1.00, ["snare_v3", "snare_v3b"])],
+        .hat: [(0.5, ["hat_c", "hat_d"]), (1.00, ["hat_a", "hat_b"])],
+        .ohat: [(1.00, ["ohat", "ohat_b"])],
+        .clap: [(1.00, ["clap_a", "clap_b", "clap_c"])],
+        .rim: [(0.5, ["rim_a"]), (1.00, ["rim_b"])],
+        .tom: [(0.35, ["tom_v1"]), (0.7, ["tom_v2"]), (1.00, ["tom_v3"])],
+        .perc: [(0.5, ["perc_v1"]), (1.00, ["perc_v2"])],
+      ]
     }
-    lock.unlock()
+  }
+
+  static func load() { load(.acoustic) }
+
+  static func load(_ kit: SampleKit) {
+    if isLoaded(kit) { return }
     var built: [DrumVoice: [Layer]] = [:]
-    func put(_ voice: DrumVoice, _ specs: [(Float, [String])]) {
+    for (voice, layerSpecs) in specs(kit) {
       var layers: [Layer] = []
-      for (vel, names) in specs {
-        let takes = names.compactMap { read($0) }
+      for (vel, names) in layerSpecs {
+        let takes = names.compactMap { read($0, folder: kit.folder) }
         if !takes.isEmpty { layers.append(Layer(vel: vel, takes: takes)) }
       }
       if !layers.isEmpty { built[voice] = layers }
     }
-    put(.kick, [
-      (0.28, ["kick_v2"]),
-      (0.68, ["kick_v5"]),
-      (1.00, ["kick_v7"]),
-    ])
-    put(.snare, [
-      (0.35, ["snare_v3"]),
-      (0.68, ["snare_v5", "snare_v5b"]),
-      (1.00, ["snare_v7"]),
-    ])
-    put(.hat, [
-      (0.30, ["hat_v1"]),
-      (0.62, ["hat_v3"]),
-      (1.00, ["hat_v4"]),
-    ])
-    put(.ohat, [
-      (1.00, ["ohat"]),
-    ])
-    put(.clap, [
-      (0.48, ["clap_a", "clap_b"]),
-      (1.00, ["clap_c", "clap_b"]),
-    ])
-    put(.rim, [
-      (0.45, ["rim_a"]),
-      (1.00, ["rim_b"]),
-    ])
-    put(.tom, [
-      (0.45, ["tom_v2"]),
-      (1.00, ["tom_v4"]),
-    ])
-    // No perc samples: the kit's perc is the synthesised shaker (these were a cowbell).
     lock.lock()
-    if !loaded {
-      banks = built
-      loaded = true
+    if !loaded.contains(kit) {
+      banks[kit] = built
+      loaded.insert(kit)
     }
     lock.unlock()
   }
@@ -79,6 +115,7 @@ enum AcousticKit {
   @discardableResult
   static func mix(
     _ voice: DrumVoice,
+    kit: SampleKit = .acoustic,
     vel: Float,
     _ L: UnsafeMutablePointer<Float>,
     _ R: UnsafeMutablePointer<Float>,
@@ -87,10 +124,10 @@ enum AcousticKit {
     _ at: Int,
     pan: DrumPan = .center
   ) -> Int {
-    if !isLoaded { return 0 }
-    let hits = pick(voice, vel: vel)
+    if !isLoaded(kit) { return 0 }
+    let hits = pick(voice, kit: kit, vel: vel)
     guard !hits.isEmpty else { return 0 }
-    let trim = levelTrim(voice)
+    let trim = levelTrim(voice, kit: kit)
     var written = 0
     for play in hits {
       let n = AudioDSP.mixSample(
@@ -110,18 +147,43 @@ enum AcousticKit {
   /// matched on punch (the loudest 50 ms of a hit, how loud a drum sounds) at the
   /// velocities that carry a groove, 0.8 and 1.0. A single overall boost would have made
   /// the hats harsh and left rim and perc buried. Soft hits keep the samples' wider
-  /// natural dynamics.
-  private static func levelTrim(_ voice: DrumVoice) -> Float {
+  /// natural dynamics. Studio and Hand are matched to the acoustic kit's balance.
+  private static func levelTrim(_ voice: DrumVoice, kit: SampleKit) -> Float {
     let dB: Float
-    switch voice {
-    case .kick: dB = 7.8
-    case .snare: dB = 7.5
-    case .hat: dB = -0.3
-    case .ohat: dB = 1.3
-    case .clap: dB = 4.7
-    case .rim: dB = 15.4   // punch-matched at 20.7, but its sharp ~3 kHz click peaked over the snare
-    case .tom: dB = 12.8
-    case .perc: dB = 21.3
+    switch kit {
+    case .acoustic:
+      switch voice {
+      case .kick: dB = 7.8
+      case .snare: dB = 7.5
+      case .hat: dB = -0.3
+      case .ohat: dB = 1.3
+      case .clap: dB = 4.7
+      case .rim: dB = 15.4   // punch-matched at 20.7, but its sharp ~3 kHz click peaked over the snare
+      case .tom: dB = 12.8
+      case .perc: dB = 21.3
+      }
+    case .studio:
+      switch voice {
+      case .kick: dB = 3.0
+      case .snare: dB = 2.6
+      case .hat: dB = -0.6
+      case .ohat: dB = -1.0
+      case .clap: dB = 8.0  // a single hand: peaky, the kit limiter holds it ~4 dB under a group clap
+      case .rim: dB = 9.8
+      case .tom: dB = 6.2
+      case .perc: dB = -5.1
+      }
+    case .hand:
+      switch voice {
+      case .kick: dB = 3.0
+      case .snare: dB = 1.8
+      case .hat: dB = 17.5
+      case .ohat: dB = 18.1
+      case .clap: dB = -0.8
+      case .rim: dB = -4.8
+      case .tom: dB = 8.9
+      case .perc: dB = -6.3
+      }
     }
     return powf(10, dB / 20)
   }
@@ -134,11 +196,16 @@ enum AcousticKit {
     var maxSec: Double
   }
 
-  private static func pick(_ voice: DrumVoice, vel: Float) -> [Play] {
-    guard let layers = banks[voice], !layers.isEmpty else { return [] }
+  private static func pick(_ voice: DrumVoice, kit: SampleKit, vel: Float) -> [Play] {
+    // Jam phrases render off the main thread while a kit may be loading: the banks and
+    // round-robin counters are only touched under the lock.
+    lock.lock()
+    let layers = banks[kit]?[voice] ?? []
+    let idx = rr[kit]?[voice] ?? 0
+    rr[kit, default: [:]][voice] = idx + 1
+    lock.unlock()
+    guard !layers.isEmpty else { return [] }
     let v = max(0.05, min(1, vel))
-    let idx = rr[voice, default: 0]
-    rr[voice] = idx + 1
 
     let tone = toneFor(voice, v)
     let pitch = pitchFor(voice, v, idx)
@@ -223,10 +290,10 @@ enum AcousticKit {
     maxSecFor(voice, Double(v))
   }
 
-  private static func read(_ name: String) -> AVAudioPCMBuffer? {
+  private static func read(_ name: String, folder: String) -> AVAudioPCMBuffer? {
     let url =
-      Bundle.main.url(forResource: name, withExtension: "wav", subdirectory: "Samples/Acoustic")
-      ?? Bundle.main.url(forResource: name, withExtension: "wav")
+      Bundle.main.url(forResource: name, withExtension: "wav", subdirectory: folder)
+      ?? (folder == SampleKit.acoustic.folder ? Bundle.main.url(forResource: name, withExtension: "wav") : nil)
     guard let url, let file = try? AVAudioFile(forReading: url) else { return nil }
     let frames = AVAudioFrameCount(file.length)
     guard frames > 16 else { return nil }

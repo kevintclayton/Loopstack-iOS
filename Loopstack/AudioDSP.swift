@@ -112,9 +112,12 @@ enum AudioDSP {
     loopBars: Int,
     format: AVAudioFormat,
     acoustic: Bool = false,
+    sampleKit: SampleKit = .acoustic,
     analog: Bool = false,
     neon: Bool = false,
+    fm: Bool = false,
     sampler: SamplerCharacter? = nil,
+    pitch: Double = 0,
     fixedGain: Float? = nil
   ) -> AVAudioPCMBuffer {
     let sampleRate = format.sampleRate
@@ -161,6 +164,27 @@ enum AudioDSP {
     // Neon: what the snare, clap and toms send to the gated reverb, and where each opens the gate.
     var send: [Float] = neon ? [Float](repeating: 0, count: frames) : []
     var gateAt: [Int] = []
+    // Pitch works like a sampler's: each hit is rendered as if the output ran at a
+    // different rate (sr / ratio), so played back at the real rate it's higher and
+    // shorter, or lower and longer, together.
+    let ratio = pow(2, max(-12, min(12, pitch)) / 12)
+    let hitRate = sampleRate / ratio
+    func voice(_ hit: Placed, _ dL: UnsafeMutablePointer<Float>, _ dR: UnsafeMutablePointer<Float>, _ dS: UnsafeMutablePointer<Float>?,
+               _ n: Int, _ sr: Double, _ at: Int) {
+      if neon, let dS {
+        renderNeon(hit.voice, dL, dR, dS, n, sr, at, hit.vel, step: hit.step, pan: hit.pan)
+      } else if fm {
+        renderFM(hit.voice, dL, dR, n, sr, at, hit.vel, step: hit.step, pan: hit.pan)
+      } else if analog {
+        renderAnalog(hit.voice, dL, dR, n, sr, at, hit.vel, step: hit.step, pan: hit.pan)
+      } else if acoustic {
+        if AcousticKit.mix(hit.voice, kit: sampleKit, vel: hit.vel, dL, dR, n, sr, at, pan: hit.pan) == 0 {
+          renderVoice(hit.voice, dL, dR, n, sr, at, hit.vel, pan: hit.pan)
+        }
+      } else {
+        renderVoice(hit.voice, dL, dR, n, sr, at, hit.vel, pan: hit.pan)
+      }
+    }
     for hit in placed {
       let at = Int((hit.t * sampleRate).rounded())
       let destL = hit.voice == .ohat ? oL : L
@@ -168,20 +192,9 @@ enum AudioDSP {
       if hit.voice == .hat {
         chokeOpenHats(oL, oR, from: at, frames: frames, sr: sampleRate)
       }
-      if neon {
-        send.withUnsafeMutableBufferPointer { s in
-          renderNeon(hit.voice, destL, destR, s.baseAddress!, frames, sampleRate, at, hit.vel, step: hit.step, pan: hit.pan)
-        }
-        if hit.voice == .snare || hit.voice == .clap || hit.voice == .tom { gateAt.append(at) }
-      } else if analog {
-        renderAnalog(hit.voice, destL, destR, frames, sampleRate, at, hit.vel, step: hit.step, pan: hit.pan)
-      } else if acoustic {
-        let n = AcousticKit.mix(hit.voice, vel: hit.vel, destL, destR, frames, sampleRate, at, pan: hit.pan)
-        if n == 0 {
-          renderVoice(hit.voice, destL, destR, frames, sampleRate, at, hit.vel, pan: hit.pan)
-        }
-      } else {
-        renderVoice(hit.voice, destL, destR, frames, sampleRate, at, hit.vel, pan: hit.pan)
+      if neon, hit.voice == .snare || hit.voice == .clap || hit.voice == .tom { gateAt.append(at) }
+      send.withUnsafeMutableBufferPointer { s in
+        voice(hit, destL, destR, s.baseAddress, frames, hitRate, at)
       }
     }
     for i in 0..<frames {
@@ -200,6 +213,11 @@ enum AudioDSP {
       // down to fit the loudest spike, catch the spikes (like a mix engineer would), so
       // the kit sits at the electronic kit's level. Deterministic, so jam phrases match.
       limitDrums(L, R, frames, sampleRate, preGain: acousticPreGain)
+      var g = sampleKit.postGain
+      if g != 1 {
+        vDSP_vsmul(L, 1, &g, L, 1, vDSP_Length(frames))
+        if R != L { vDSP_vsmul(R, 1, &g, R, 1, vDSP_Length(frames)) }
+      }
     } else if let g = fixedGain {
       // Jam phrases use the groove's own level so a loud fill can't dip a whole phrase.
       if g != 1 {
@@ -300,8 +318,15 @@ enum AudioDSP {
   }
 
   /// The gain `renderPattern` would normalize this groove with (1 if it doesn't clip).
-  static func grooveGain(_ pattern: DrumPattern, bpm: Double, format: AVAudioFormat, acoustic: Bool, analog: Bool = false, neon: Bool = false, sampler: SamplerCharacter? = nil) -> Float {
-    let b = renderPattern(pattern, bpm: bpm, loopBars: max(1, pattern.bars), format: format, acoustic: acoustic, analog: analog, neon: neon, sampler: sampler, fixedGain: 1)
+  /// Renders with a kit's whole voicing (what the engine uses).
+  static func renderPattern(_ pattern: DrumPattern, bpm: Double, loopBars: Int, format: AVAudioFormat,
+                            voicing v: KitVoicing, fixedGain: Float? = nil) -> AVAudioPCMBuffer {
+    renderPattern(pattern, bpm: bpm, loopBars: loopBars, format: format, acoustic: v.acoustic, sampleKit: v.sampleKit,
+                  analog: v.analog, neon: v.neon, fm: v.fm, sampler: v.sampler, pitch: v.pitch, fixedGain: fixedGain)
+  }
+
+  static func grooveGain(_ pattern: DrumPattern, bpm: Double, format: AVAudioFormat, voicing v: KitVoicing) -> Float {
+    let b = renderPattern(pattern, bpm: bpm, loopBars: max(1, pattern.bars), format: format, voicing: v, fixedGain: 1)
     var peak: Float = 0
     for c in 0..<Int(b.format.channelCount) {
       let p = b.floatChannelData![c]
@@ -1085,16 +1110,40 @@ enum DrumKit: String, CaseIterable, Identifiable {
   /// Big mid-80s drum machine: punchy kick, snare and clap in a huge gated reverb,
   /// swooping electronic toms, through a cleaner 12-bit sampler.
   case neon
+  /// Digital FM drums: sine kick with an FM knock, inharmonic FM snare and metal hats,
+  /// woodblock rim, swept toms. Clean 12-bit digital.
+  case fm
   /// Recorded one-shots (VCSL, CC0).
   case acoustic
+  /// A second recorded kit (VCSL, CC0): muted bass drum, brighter snare, high tom, tambourine.
+  case studio
+  /// Hand percussion (VCSL, CC0): cajon, shaker, tambourine, congas, bongo, claps.
+  case hand
   var id: String { rawValue }
   var label: String {
     switch self {
     case .dusty: return "Dusty"
     case .crunch: return "Crunch"
     case .neon: return "Neon"
+    case .fm: return "FM"
     case .acoustic: return "Acoustic"
+    case .studio: return "Studio"
+    case .hand: return "Hand"
     }
+  }
+  /// The recorded sample set, for the sample kits.
+  var sampleKit: SampleKit? {
+    switch self {
+    case .acoustic: return .acoustic
+    case .studio: return .studio
+    case .hand: return .hand
+    default: return nil
+    }
+  }
+  /// How this kit renders, at a drum pitch (semitones).
+  func voicing(pitch: Double) -> KitVoicing {
+    KitVoicing(acoustic: sampleKit != nil, sampleKit: sampleKit ?? .acoustic, analog: analog,
+               neon: self == .neon, fm: self == .fm, sampler: sampler, pitch: pitch)
   }
   /// Voiced by the analog machine (Dusty, Crunch).
   var analog: Bool { self == .dusty || self == .crunch }
@@ -1104,9 +1153,21 @@ enum DrumKit: String, CaseIterable, Identifiable {
     case .dusty: return .dusty
     case .crunch: return .crunch
     case .neon: return .neon
-    case .acoustic: return nil
+    case .fm: return .fm
+    case .acoustic, .studio, .hand: return nil
     }
   }
+}
+
+/// Everything that decides how a kit renders.
+struct KitVoicing {
+  var acoustic = false
+  var sampleKit: SampleKit = .acoustic
+  var analog = false
+  var neon = false
+  var fm = false
+  var sampler: SamplerCharacter?
+  var pitch: Double = 0
 }
 
 /// Vintage sampler emulation: the machine sampled through old gear. Saturation, then
@@ -1125,6 +1186,8 @@ struct SamplerCharacter {
   static let dusty = SamplerCharacter(drive: 1.6, rate: 26_040, bits: 12, lowpass: 9_000, level: 0.45)
   static let crunch = SamplerCharacter(drive: 2.6, rate: 22_050, bits: 10, lowpass: 13_000, level: 0.38)
   /// Cleaner and brighter: the 12-bit, ~30 kHz machines of the mid-80s.
+  /// Digital FM: full bandwidth, 12-bit like the classic FM keyboards' converters.
+  static let fm = SamplerCharacter(drive: 1.0, rate: 44_100, bits: 12, lowpass: 16_000, level: 0.57)
   static let neon = SamplerCharacter(drive: 1.2, rate: 30_000, bits: 12, lowpass: 13_500, level: 0.77)
 }
 
@@ -1545,6 +1608,133 @@ extension AudioDSP {
         idx[k] = (idx[k] + 1) % lines[k].count
       }
       return ((o[0] + o[2]) * 0.7, (o[1] + o[3]) * 0.7)
+    }
+  }
+}
+
+// MARK: - FM kit
+
+extension AudioDSP {
+  /// One FM drum hit: sine operators, each with its own decaying envelope.
+  static func renderFM(
+    _ voice: DrumVoice, _ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>,
+    _ frames: Int, _ sr: Double, _ at: Int, _ vel: Float, step: Int, pan: DrumPan
+  ) {
+    var rng = DrumRng(seed: UInt64(truncatingIfNeeded: at) &* 0x6A09_E667 &+ UInt64(voice.rawValue.count) &* 0x3C6E_F372)
+    let v = Double(max(0.05, min(1, vel)))
+    // Per-voice level, balanced against the acoustic kit.
+    let trimDB: Double
+    switch voice {
+    case .kick: trimDB = 0
+    case .snare: trimDB = -3.3
+    case .hat: trimDB = -6.8
+    case .ohat: trimDB = -3.7
+    case .clap: trimDB = 5.0
+    case .rim: trimDB = -8.8
+    case .tom: trimDB = -4.0
+    case .perc: trimDB = 10.4
+    }
+    let trim = pow(10, trimDB / 20)
+    func put(_ i: Int, _ s: Double) {
+      let j = at + i
+      guard j >= 0, j < frames else { return }
+      L[j] += Float(s * trim) * pan.l
+      R[j] += Float(s * trim) * pan.r
+    }
+    let tau = 2 * Double.pi
+    switch voice {
+    case .kick:
+      // Sine body dropping from ~170 Hz, knocked by a same-pitch modulator whose index
+      // dies in ~30 ms (the FM "thock"), velocity making the knock harder.
+      let decay = 0.26 + 0.14 * v
+      let n = Int(sr * min(1.5, decay * 5))
+      var ph = 0.0
+      let amp = 0.6 + 0.4 * v
+      for i in 0..<n {
+        let t = Double(i) / sr
+        let f = 48 * (1 + 2.5 * exp(-t / 0.014) + 0.3 * exp(-t / 0.06))
+        ph += tau * f / sr
+        let index = (1.2 + 2.4 * v) * exp(-t / 0.03)
+        let s = sin(ph + index * sin(ph)) * exp(-t / decay)
+        put(i, tanh(1.8 * s) / tanh(1.8) * amp)
+      }
+    case .snare:
+      // Two inharmonic FM pairs for the shell, a quick noise burst for the wires.
+      let n = Int(sr * 0.4)
+      var hp = Biquad2(), lp = Biquad2()
+      hp.highpass(2000, 0.707, sr); lp.lowpass(12_000, 0.707, sr)
+      let amp = 0.5 + 0.5 * v
+      var c1 = 0.0, c2 = 0.0
+      for i in 0..<n {
+        let t = Double(i) / sr
+        let drop = 1 + 0.3 * exp(-t / 0.01)
+        c1 += tau * 190 * drop / sr
+        c2 += tau * 310 * drop / sr
+        let i1 = 3.5 * exp(-t / 0.05), i2 = 2.5 * exp(-t / 0.035)
+        let shell = (0.6 * sin(c1 + i1 * sin(c1 * 1.58)) + 0.4 * sin(c2 + i2 * sin(c2 * 2.31))) * exp(-t / 0.09)
+        let wires = lp.run(hp.run(rng.bipolar())) * exp(-t / (0.08 + 0.05 * v))
+        put(i, tanh(1.4 * (shell * 0.75 + wires * 0.8)) / tanh(1.4) * amp)
+      }
+    case .hat, .ohat:
+      // FM metal: a high carrier driven hard by an inharmonic modulator, then a second
+      // pair for density, high-passed.
+      let open = voice == .ohat
+      let decay = open ? 0.22 + 0.12 * v : 0.024 + 0.016 * v
+      let n = Int(sr * min(1.2, decay * 6))
+      var hp = Biquad2(), hp2 = Biquad2()
+      hp.highpass(6500, 0.707, sr); hp2.highpass(6500, 0.707, sr)
+      var p1 = rng.unit() * tau, p2 = rng.unit() * tau
+      let amp = (0.35 + 0.65 * v) * (open ? 0.85 : 0.8)
+      for i in 0..<n {
+        let t = Double(i) / sr
+        p1 += tau * 1047 / sr
+        p2 += tau * 1523 / sr
+        let s = sin(p1 + 6.5 * sin(p1 * 1.4142)) * 0.55 + sin(p2 + 5.0 * sin(p2 * 2.7183)) * 0.45
+        put(i, hp2.run(hp.run(s)) * exp(-t / decay) * amp * 1.4)
+      }
+    case .clap:
+      // Noise hands, with a short FM zap under them for the digital snap.
+      let n = Int(sr * 0.35)
+      var bp = Biquad2()
+      bp.bandpass(1400, 1.0, sr)
+      let bursts = [0.0, 0.01, 0.02, 0.031]
+      let amp = 0.5 + 0.5 * v
+      var zp = 0.0
+      for i in 0..<n {
+        let t = Double(i) / sr
+        var env = 0.0
+        for b in bursts where t >= b { env = max(env, exp(-(t - b) / 0.0045)) }
+        if t >= bursts[3] { env = max(env, 0.5 * exp(-(t - bursts[3]) / 0.1)) }
+        zp += tau * 900 / sr
+        let zap = sin(zp + 4 * exp(-t / 0.01) * sin(zp * 1.5)) * exp(-t / 0.015) * 0.3
+        put(i, (bp.run(rng.bipolar()) * env * 1.5 + zap) * amp)
+      }
+    case .rim:
+      // Woodblock: a short, bright FM ping.
+      let n = Int(sr * 0.08)
+      let amp = 0.45 + 0.55 * v
+      var p = 0.0
+      for i in 0..<n {
+        let t = Double(i) / sr
+        p += tau * 1250 / sr
+        put(i, sin(p + 2.2 * exp(-t / 0.006) * sin(p * 2.3)) * exp(-t / 0.018) * amp)
+      }
+    case .tom:
+      // FM tom: sine with a strong pitch sweep and a fading modulator for the attack.
+      let pos = Double(((step % 16) + 16) % 16) / 15
+      let f0 = 200 * pow(0.5, pos * 1.1)
+      let decay = 0.22 + 0.12 * v + 0.08 * pos
+      let n = Int(sr * min(1.4, decay * 5))
+      var p = 0.0
+      let amp = 0.5 + 0.5 * v
+      for i in 0..<n {
+        let t = Double(i) / sr
+        p += tau * f0 * (1 + 0.6 * exp(-t / 0.06)) / sr
+        let index = 1.8 * exp(-t / 0.04)
+        put(i, tanh(1.3 * sin(p + index * sin(p))) / tanh(1.3) * exp(-t / decay) * amp)
+      }
+    case .perc:
+      shaker(L, R, frames, sr, at, Float(v), pan: DrumPan(l: pan.l * Float(trim), r: pan.r * Float(trim)), bright: true)
     }
   }
 }

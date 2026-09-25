@@ -170,7 +170,9 @@ final class LoopEngine: ObservableObject {
   @Published var drumsOn = false
   @Published var jamMode = false
   @Published var drumKit: DrumKit = .dusty
-  var acousticKit: Bool { drumKit == .acoustic }
+  var acousticKit: Bool { drumKit.sampleKit != nil }
+  /// How the drums render now: the kit plus the drum pitch.
+  var drumVoicing: KitVoicing { drumKit.voicing(pitch: Double(drumPitch)) }
   @Published var fillArmed = false
   @Published var drumId = "floor"
   @Published var masterGain: Float = 0.85
@@ -204,6 +206,12 @@ final class LoopEngine: ObservableObject {
   /// the body the old default Drive used to add, without the distortion.
   @Published var drumComp: Float = 0.5
   @Published var drumVinyl: Float = 0
+  /// Tape and Wear on the drum bus (the same machine as the keys').
+  @Published var drumTape: Float = 0
+  @Published var drumWear: Float = 0
+  /// Drum pitch in semitones, -12...12: like a sampler's pitch, higher is also shorter.
+  @Published var drumPitch: Int = 0
+  private var pitchRender: DispatchWorkItem?
   /// Drum room send. 0.35 puts the room ~21 dB under the kit: air, not obvious reverb.
   @Published var drumRoom: Float = 0.35
   @Published var instrumentGlitch: Float = 0
@@ -288,6 +296,20 @@ final class LoopEngine: ObservableObject {
   let barPresets = [1, 2, 4, 8, 16, 32, 64, 128]
 
   var drumName: String { DrumLibrary.find(drumId).name }
+
+  // MARK: Song mode state
+  @Published var songBlocks: [SongBlock] = []
+  /// Capturing the stack for Send to song, and how far through the cycle it is.
+  @Published var sendingToSong = false
+  @Published var sendProgress: Double = 0
+  /// Brief confirmation after a send ("Added Block 3").
+  @Published var sendNote: String?
+  @Published var songPlaying = false
+  /// Seconds into the song while it plays.
+  @Published var songPosition: Double = 0
+  var songLength: Double { songBlocks.reduce(0) { $0 + $1.seconds * Double($1.repeats) } }
+  /// Whether there's anything in the stack to send.
+  var canSendToSong: Bool { !layers.isEmpty || drumsOn }
   var running: Bool { status != .idle }
   var recording: Bool { status == .recording }
 
@@ -349,12 +371,21 @@ final class LoopEngine: ObservableObject {
   private let captureState = CaptureState()
   private let liveSynth = LiveSynth()
   private let liveArp = LiveArp()
+  /// Tape on the drum bus. At the keys' nominal level the drum bus stays within ~1 dB
+  /// (RMS) across the control, and its peaks don't rise.
+  private let drumTapeSim = TapeSim()
   private let tapeSim = TapeSim()
   private var synthNode: AVAudioSourceNode?
   /// One timeline for drums and loops.
   private let transportClock = TransportClock()
   private lazy var liveDrums = LiveDrums(clock: transportClock)
   private var drumNode: AVAudioSourceNode?
+  /// Song mode: captures the stack a cycle at a time, and plays the song back.
+  private lazy var stackCapture = StackCapture(clock: transportClock)
+  private let songLoopsPlayer = AVAudioPlayerNode()
+  private let songDrumsPlayer = AVAudioPlayerNode()
+  private var songStartedAt: TimeInterval = 0
+  private var songGen = 0
   private lazy var liveLayers = LiveLayers(clock: transportClock)
   private let liveMetro = LiveMetro()
   private var metroNode: AVAudioSourceNode?
@@ -372,6 +403,7 @@ final class LoopEngine: ObservableObject {
   func unlock() {
     unlocked = true
     savedSounds = SoundLibrary.loadIndex()
+    songBlocks = SongStore.load()
     startClock()
     observeAudioLifecycle()
     ensureRunning()
@@ -497,12 +529,22 @@ final class LoopEngine: ObservableObject {
         self.restartEngine()
       }
     })
-    // No background audio: pause on leaving so nothing drifts while suspended, and make
-    // sure the engine is running again on return.
+    // Background audio: the stack or song keeps playing when the app is left or the
+    // phone locked. With the mic on it pauses instead (iOS would show the recording
+    // indicator while in the background), and with nothing playing the engine stops so
+    // the app holds no audio in the background. It restarts on return.
     lifecycleObservers.append(nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
       Task { @MainActor in
-        guard let self, self.running else { return }
-        self.pause()
+        guard let self else { return }
+        if self.micWanted {
+          if self.running { self.pause() }
+          if self.songPlaying { self.stopSong() }
+        }
+        if !self.running, !self.songPlaying, !self.sessionRecording, self.engine.isRunning {
+          self.engine.stop()
+          self.audioRunning = false
+          try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
       }
     })
     lifecycleObservers.append(nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
@@ -543,7 +585,7 @@ final class LoopEngine: ObservableObject {
     let main = engine.mainMixerNode
     [loopsMixer, drumsMixer, metroMixer, instMixer, instDelay, instReverb, instPost, micMixer, loopDelay, loopReverb, loopDelayBus, loopReverbBus].forEach { engine.attach($0) }
     liveDrums.sampleRate = format.sampleRate
-    let dnode = AudioGraph.drumsNode(format: format, drums: liveDrums)
+    let dnode = AudioGraph.drumsNode(format: format, drums: liveDrums, tape: drumTapeSim)
     engine.attach(dnode)
     engine.connect(dnode, to: drumsMixer, format: format)
     drumNode = dnode
@@ -617,6 +659,17 @@ final class LoopEngine: ObservableObject {
       setSends(slot, delay: 0, reverb: 0)
       layerSlots.append(slot)
     }
+
+    // Song playback goes through the master bus like everything else.
+    [songLoopsPlayer, songDrumsPlayer].forEach {
+      engine.attach($0)
+      engine.connect($0, to: main, format: format)
+    }
+    // Send to song listens to the loops bus, the drums bus and the drum room.
+    let capture = stackCapture
+    loopsMixer.installTap(onBus: 0, bufferSize: 1024, format: format) { b, w in capture.append(.loops, b, when: w) }
+    drumsMixer.installTap(onBus: 0, bufferSize: 1024, format: format) { b, w in capture.append(.drums, b, when: w) }
+    drumRoomVerb.installTap(onBus: 0, bufferSize: 1024, format: format) { b, w in capture.append(.room, b, when: w) }
 
     applyGains()
     applyInstrumentSpace()
@@ -733,11 +786,11 @@ final class LoopEngine: ObservableObject {
   }
   func setDrumKit(_ kit: DrumKit) {
     drumKit = kit
-    if kit == .acoustic, !AcousticKit.isLoaded {
+    if let samples = kit.sampleKit, !AcousticKit.isLoaded(samples) {
       Task.detached(priority: .userInitiated) {
-        AcousticKit.load()
+        AcousticKit.load(samples)
         await MainActor.run {
-          guard self.drumKit == .acoustic else { return }
+          guard self.drumKit == kit else { return }
           if self.drumsOn, self.running { self.rescheduleDrums() }
         }
       }
@@ -770,6 +823,21 @@ final class LoopEngine: ObservableObject {
   func setDrumDirt(_ v: Float) { drumDirt = v; liveDrums.dirt = v }
   func setDrumVinyl(_ v: Float) { drumVinyl = v; liveDrums.vinyl = v }
   func setDrumComp(_ v: Float) { drumComp = v; liveDrums.comp = v }
+  func setDrumTape(_ v: Float) { drumTape = v; drumTapeSim.set(amount: v, sampleRate: format.sampleRate) }
+  func setDrumWear(_ v: Float) { drumWear = v; drumTapeSim.set(wear: v) }
+  /// Pitch re-renders the kit, so a drag only re-renders once it pauses.
+  func setDrumPitch(_ st: Int) {
+    let st = min(12, max(-12, st))
+    guard st != drumPitch else { return }
+    drumPitch = st
+    pitchRender?.cancel()
+    let work = DispatchWorkItem { [weak self] in
+      guard let self, self.drumsOn, self.running else { return }
+      self.rescheduleDrums()
+    }
+    pitchRender = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+  }
   func setDrumRoom(_ v: Float) { drumRoom = v; applyDrumRoom() }
 
   private func applyDrumRoom() {
@@ -1048,6 +1116,7 @@ final class LoopEngine: ObservableObject {
   /// metronome and every loop placed on the same timeline.
   func play() {
     ensureRunning()
+    if songPlaying { stopSong() }
     if status == .idle {
       // Status first: rescheduleDrums (via beginCycle) only enables drums while running.
       status = .playing
@@ -1076,6 +1145,7 @@ final class LoopEngine: ObservableObject {
     capturing = false
     takeStart = -1
     takeDone = 0
+    if sendingToSong { cancelSend() }
     status = .idle
     position = 0
     resumePosition = 0
@@ -1090,6 +1160,7 @@ final class LoopEngine: ObservableObject {
   /// (Stop discards it).
   func record() {
     ensureRunning()
+    if songPlaying { stopSong() }
     if status == .recording { return }
     if status == .idle {
       if countInOn {
@@ -1492,7 +1563,7 @@ final class LoopEngine: ObservableObject {
     var files: [(String, Data)] = []
     if drumsOn {
       let pattern = DrumLibrary.find(drumId)
-      let buf = AudioDSP.renderPattern(pattern, bpm: Double(bpm), loopBars: bars, format: format, acoustic: acousticKit, analog: drumKit.analog, neon: drumKit == .neon, sampler: drumKit.sampler)
+      let buf = AudioDSP.renderPattern(pattern, bpm: Double(bpm), loopBars: bars, format: format, voicing: drumVoicing)
       AudioDSP.colorDrums(buf, drive: drumDrive, dirt: drumDirt, vinyl: drumVinyl, comp: drumComp,
                           crackle: vinylTrack(for: pattern, frames: Int(buf.frameLength), bpm: Double(bpm), sampleRate: format.sampleRate))
       files.append(("Drums - \(pattern.name).wav", AudioDSP.encodeWav(buf)))
@@ -1566,6 +1637,175 @@ final class LoopEngine: ObservableObject {
     }
   }
 
+  // MARK: Song mode
+
+  /// Captures one full cycle of the stack as it sounds now and adds it to the song.
+  /// Starts the stack if it's stopped; the capture wraps round the loop like a take.
+  func sendToSong() {
+    guard !sendingToSong, canSendToSong else { return }
+    if !running { play() }
+    let frames = max(1, Int((loopDuration * format.sampleRate).rounded()))
+    stackCapture.begin(frames: frames, sampleRate: format.sampleRate)
+    sendingToSong = true
+    sendProgress = 0
+    sendNote = nil
+  }
+
+  private func cancelSend() {
+    stackCapture.cancel()
+    sendingToSong = false
+    sendProgress = 0
+  }
+
+  private func sendTick() {
+    let p = stackCapture.progress
+    if abs(p - sendProgress) > 0.005 { sendProgress = p }
+    guard let take = stackCapture.take() else { return }
+    sendingToSong = false
+    sendProgress = 0
+    let id = UUID().uuidString
+    let number = (songBlocks.compactMap { Int($0.name.replacingOccurrences(of: "Block ", with: "")) }.max() ?? 0) + 1
+    let kitLine = drumsOn ? "\(drumKit.label) · \(drumName)" : "No drums"
+    let loopsLine = layers.isEmpty ? "" : " · \(layers.count) loop\(layers.count == 1 ? "" : "s")"
+    let block = SongBlock(id: id, name: "Block \(number)", bpm: bpm, bars: bars, frames: take.loopsL.count,
+                          sampleRate: take.sampleRate, repeats: 1, detail: kitLine + loopsLine)
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        try SongStore.write(take.loopsL, take.loopsR, sampleRate: take.sampleRate, to: SongStore.loopsURL(id))
+        try SongStore.write(take.drumsL, take.drumsR, sampleRate: take.sampleRate, to: SongStore.drumsURL(id))
+        DispatchQueue.main.async {
+          self.songBlocks.append(block)
+          SongStore.save(self.songBlocks)
+          self.sendNote = "Added \(block.name) to the song"
+          DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            if self?.sendNote == "Added \(block.name) to the song" { self?.sendNote = nil }
+          }
+        }
+      } catch {
+        SongStore.delete(id)
+        DispatchQueue.main.async { self.sendNote = "Couldn't save the block" }
+      }
+    }
+  }
+
+  func setRepeats(_ id: String, _ n: Int) {
+    guard let i = songBlocks.firstIndex(where: { $0.id == id }) else { return }
+    songBlocks[i].repeats = min(32, max(1, n))
+    songChanged()
+  }
+
+  func moveBlock(_ id: String, by d: Int) {
+    guard let i = songBlocks.firstIndex(where: { $0.id == id }) else { return }
+    let j = i + d
+    guard songBlocks.indices.contains(j) else { return }
+    songBlocks.swapAt(i, j)
+    songChanged()
+  }
+
+  func duplicateBlock(_ id: String) {
+    guard let i = songBlocks.firstIndex(where: { $0.id == id }) else { return }
+    var copy = songBlocks[i]
+    copy.id = UUID().uuidString
+    guard SongStore.copy(songBlocks[i].id, to: copy.id) else { return }
+    let number = (songBlocks.compactMap { Int($0.name.replacingOccurrences(of: "Block ", with: "")) }.max() ?? 0) + 1
+    copy.name = "Block \(number)"
+    songBlocks.insert(copy, at: i + 1)
+    songChanged()
+  }
+
+  func deleteBlock(_ id: String) {
+    guard let i = songBlocks.firstIndex(where: { $0.id == id }) else { return }
+    songBlocks.remove(at: i)
+    SongStore.delete(id)
+    songChanged()
+  }
+
+  /// Any edit: save, and stop playback (its schedule no longer matches the song).
+  private func songChanged() {
+    SongStore.save(songBlocks)
+    if songPlaying { stopSong() }
+  }
+
+  /// Plays the song from the top: every block's passes queued back to back on two
+  /// players (loops, drums) started together, so blocks join gaplessly and stay locked.
+  func toggleSong() {
+    if songPlaying { stopSong(); return }
+    guard !songBlocks.isEmpty else { return }
+    ensureRunning()
+    if running { stop() }
+    guard engine.isRunning else { return }
+    let fmt = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 2)!
+    songGen += 1
+    let gen = songGen
+    var last: (AVAudioPCMBuffer, AVAudioPCMBuffer)?
+    for block in songBlocks {
+      guard let l = SongStore.read(SongStore.loopsURL(block.id), as: fmt),
+            let d = SongStore.read(SongStore.drumsURL(block.id), as: fmt) else { continue }
+      for _ in 0..<max(1, block.repeats) {
+        songLoopsPlayer.scheduleBuffer(l, at: nil)
+        songDrumsPlayer.scheduleBuffer(d, at: nil)
+        last = (l, d)
+      }
+    }
+    guard last != nil else { return }
+    // A completion on an empty buffer after the last block marks the end.
+    let end = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 1)!
+    end.frameLength = 1
+    songLoopsPlayer.scheduleBuffer(end, at: nil, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+      DispatchQueue.main.async {
+        guard let self, self.songGen == gen, self.songPlaying else { return }
+        self.stopSong()
+      }
+    }
+    // Start both together a moment ahead, on the same sample.
+    let lead = 0.05
+    let startTime: AVAudioTime? = {
+      guard let now = songLoopsPlayer.lastRenderTime ?? engine.outputNode.lastRenderTime, now.isSampleTimeValid else { return nil }
+      return AVAudioTime(sampleTime: now.sampleTime + AVAudioFramePosition(lead * format.sampleRate), atRate: format.sampleRate)
+    }()
+    songLoopsPlayer.play(at: startTime)
+    songDrumsPlayer.play(at: startTime)
+    songStartedAt = CACurrentMediaTime() + lead
+    songPosition = 0
+    songPlaying = true
+  }
+
+  func stopSong() {
+    songGen += 1
+    songLoopsPlayer.stop()
+    songDrumsPlayer.stop()
+    songPlaying = false
+    songPosition = 0
+  }
+
+  /// The whole song as one stereo WAV (loops and drums summed, peaks held under 0 dBFS).
+  func exportSong() -> URL? {
+    guard !songBlocks.isEmpty else { return nil }
+    let sr = songBlocks[0].sampleRate
+    let fmt = AVAudioFormat(standardFormatWithSampleRate: sr, channels: 2)!
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("Loopstack Song.wav")
+    try? FileManager.default.removeItem(at: url)
+    let settings: [String: Any] = [
+      AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: sr, AVNumberOfChannelsKey: 2,
+      AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false,
+    ]
+    guard let file = try? AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false) else { return nil }
+    for block in songBlocks {
+      guard let l = SongStore.read(SongStore.loopsURL(block.id), as: fmt),
+            let d = SongStore.read(SongStore.drumsURL(block.id), as: fmt) else { continue }
+      let n = Int(min(l.frameLength, d.frameLength))
+      guard n > 0, let mix = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(n)) else { continue }
+      mix.frameLength = AVAudioFrameCount(n)
+      for c in 0..<2 {
+        let o = mix.floatChannelData![c], a = l.floatChannelData![c], b = d.floatChannelData![c]
+        for i in 0..<n { o[i] = a[i] + b[i] }
+      }
+      AudioDSP.limitDrums(mix.floatChannelData![0], mix.floatChannelData![1], n, sr, preGain: 1)
+      for _ in 0..<max(1, block.repeats) { try? file.write(from: mix) }
+    }
+    return url
+  }
+
   private func tick() {
     let runningNow = engine.isRunning
     if audioRunning != runningNow { audioRunning = runningNow }
@@ -1575,6 +1815,11 @@ final class LoopEngine: ObservableObject {
     liveSampler.collect()
     if sessionRecording {
       sessionElapsed = CACurrentMediaTime() - sessionStarted
+    }
+    if sendingToSong { sendTick() }
+    if songPlaying {
+      let p = min(songLength, max(0, CACurrentMediaTime() - songStartedAt))
+      if abs(p - songPosition) > 0.02 { songPosition = p }
     }
     guard running || status == .countin else {
       if position != 0 { position = 0 }
@@ -1717,10 +1962,7 @@ final class LoopEngine: ObservableObject {
       bpm: Double(bpm),
       loopBars: fill.bars,
       format: format,
-      acoustic: acousticKit,
-      analog: drumKit.analog,
-      neon: drumKit == .neon,
-      sampler: drumKit.sampler
+      voicing: drumVoicing
     )
     let dur = Double(fill.bars * 4) * 60 / Double(bpm)
     // Start on a bar line: the upcoming one when queued early, else the one just crossed.
@@ -1734,6 +1976,7 @@ final class LoopEngine: ObservableObject {
     liveDrums.dirt = drumDirt
     liveDrums.vinyl = drumVinyl
     liveDrums.comp = drumComp
+    drumTapeSim.set(amount: drumTape, sampleRate: format.sampleRate)
     liveDrums.sampleRate = format.sampleRate
     guard drumsOn, running else {
       liveDrums.enabled = false
@@ -1748,10 +1991,7 @@ final class LoopEngine: ObservableObject {
       bpm: Double(bpm),
       loopBars: bars,
       format: format,
-      acoustic: acousticKit,
-      analog: drumKit.analog,
-      neon: drumKit == .neon,
-      sampler: drumKit.sampler
+      voicing: drumVoicing
     )
     let crackle = vinylTrack(for: pattern, frames: Int(buf.frameLength), bpm: Double(bpm), sampleRate: format.sampleRate)
     liveDrums.setDry(buf, loopDur: loopDuration, crackle: crackle)
@@ -1841,15 +2081,12 @@ final class LoopEngine: ObservableObject {
     let seed = rng.next()
     let bpm = Double(self.bpm)
     let format = self.format
-    let acoustic = acousticKit
-    let analog = drumKit.analog
-    let neon = drumKit == .neon
-    let sampler = drumKit.sampler
+    let voicing = drumVoicing
     let P = jamPhraseDur
     DispatchQueue.global(qos: .userInitiated).async {
-      let gain = AudioDSP.grooveGain(groove, bpm: bpm, format: format, acoustic: acoustic, analog: analog, neon: neon, sampler: sampler)
+      let gain = AudioDSP.grooveGain(groove, bpm: bpm, format: format, voicing: voicing)
       let phrase = Jam.phrase(groove: groove, fill: fill, seed: seed)
-      let buf = AudioDSP.renderPattern(phrase, bpm: bpm, loopBars: Jam.phraseBars, format: format, acoustic: acoustic, analog: analog, neon: neon, sampler: sampler, fixedGain: gain)
+      let buf = AudioDSP.renderPattern(phrase, bpm: bpm, loopBars: Jam.phraseBars, format: format, voicing: voicing, fixedGain: gain)
       let period = Int((Double(max(1, groove.bars) * 4) * 60 / bpm * format.sampleRate).rounded())
       let crackle = AudioDSP.vinylTrack(frames: Int(buf.frameLength), period: period, sampleRate: format.sampleRate, seed: AudioDSP.vinylSeed(groove.id))
       DispatchQueue.main.async {
@@ -2734,7 +2971,8 @@ final class LiveDrums: @unchecked Sendable {
     }
   }
 
-  func render(frames: Int, list: UnsafeMutablePointer<AudioBufferList>, timestamp: UnsafePointer<AudioTimeStamp>?) {
+  /// `ahead`: seconds to read early (the drum tape's delay).
+  func render(frames: Int, list: UnsafeMutablePointer<AudioBufferList>, timestamp: UnsafePointer<AudioTimeStamp>?, ahead: Double = 0) {
     let buffers = UnsafeMutableAudioBufferListPointer(list)
     guard frames > 0, let data = buffers.first?.mData else { return }
     let outL = data.assumingMemoryBound(to: Float.self)
@@ -2761,7 +2999,7 @@ final class LiveDrums: @unchecked Sendable {
       return
     }
     let sr = max(r.sampleRate, 8000)
-    let t0 = now.t
+    let t0 = now.t + ahead
     // Frames before the queued switch play the current buffer, the rest the next one.
     let nN = r.nextL.count
     var split = frames
