@@ -840,15 +840,34 @@ struct KeyPadView: View {
               in: RoundedRectangle(cornerRadius: 12, style: .continuous)
             )
             .contentShape(Rectangle())
-            .gesture(
-              DragGesture(minimumDistance: 0)
-                .onChanged { _ in engine.pressNote(note.midi) }
-                .onEnded { _ in engine.releaseNote(note.midi) }
-            )
+            .modifier(PadTouch(midi: note.midi, engine: engine))
             .accessibilityLabel(note.label)
         }
       }
     }
+  }
+}
+
+/// A pad's touch. Presses the moment a finger lands, releases when it lifts, and also
+/// releases when iOS cancels the touch (say the page starts scrolling under a finger
+/// that moved slightly), which used to leave the note stuck on.
+private struct PadTouch: ViewModifier {
+  let midi: Int
+  let engine: LoopEngine
+  @GestureState private var touching = false
+
+  func body(content: Content) -> some View {
+    content
+      .gesture(
+        DragGesture(minimumDistance: 0)
+          .updating($touching) { _, state, _ in state = true }
+          .onChanged { _ in engine.pressNote(midi) }
+          .onEnded { _ in engine.releaseNote(midi) }
+      )
+      // Gesture state resets on end *and* on cancel; releasing twice is harmless.
+      .onChange(of: touching) { down in
+        if !down { engine.releaseNote(midi) }
+      }
   }
 }
 
