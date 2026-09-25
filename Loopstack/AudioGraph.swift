@@ -628,7 +628,8 @@ enum AudioGraph {
       // The arp places this buffer's steps on the synth before it renders.
       arp.process(ts, frames: Int(frameCount), clock: clock, synth: synth)
       synth.render(frames: Int(frameCount), list: abl)
-      sampler.renderAdd(frames: Int(frameCount), list: abl, dstRate: outRate)
+      sampler.renderAdd(frames: Int(frameCount), list: abl, dstRate: outRate,
+                        pitchMod: synth.pitchMod, pitchModFrames: synth.pitchModFrames)
       // Tape sits on the keys channel, before its delay and reverb.
       tape.process(abl, frames: Int(frameCount))
       return noErr

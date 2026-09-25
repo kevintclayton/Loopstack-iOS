@@ -1,3 +1,4 @@
+import CoreAudioKit
 import SwiftUI
 import UIKit
 
@@ -442,6 +443,31 @@ struct InstrumentView: View {
   @State private var saveOpen = false
   @State private var saveName = ""
 
+  /// MIDI keyboards: what's connected, and Bluetooth pairing (USB needs no setup).
+  private var midiRow: some View {
+    HStack(spacing: 8) {
+      Text("MIDI")
+        .font(.system(size: 11, weight: .medium))
+        .tracking(1.4)
+        .foregroundStyle(LS.subtle)
+      Text(engine.midiDevices.isEmpty ? "Plug in a keyboard, or pair one" : engine.midiDevices.joined(separator: ", "))
+        .font(.system(size: 12))
+        .foregroundStyle(engine.midiDevices.isEmpty ? LS.muted : LS.fg)
+        .lineLimit(1)
+        .truncationMode(.tail)
+      Spacer(minLength: 8)
+      Button { BluetoothMIDIPresenter.present() } label: {
+        Label("Bluetooth", systemImage: "dot.radiowaves.left.and.right")
+          .font(.system(size: 12, weight: .medium))
+          .foregroundStyle(LS.fg)
+          .frame(minHeight: 36)
+          .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("Connect a Bluetooth MIDI keyboard")
+    }
+  }
+
   var body: some View {
     card {
       HStack {
@@ -493,6 +519,7 @@ struct InstrumentView: View {
       // after a count-in doesn't mean scrolling past the settings. Settings follow.
       if engine.inputMode != "mic" {
         KeyPadView(engine: engine)
+        midiRow
       }
 
       HStack {
@@ -781,7 +808,7 @@ struct KeyPadView: View {
         spacing: 8
       ) {
         ForEach(engine.padNotes) { note in
-          let on = engine.heldNotes.contains(note.midi) || engine.latchedPads.contains(note.midi)
+          let on = engine.heldNotes.contains(note.midi) || engine.latchedPads.contains(note.midi) || engine.midiHeld.contains(note.midi)
           Text(engine.padLabel(note))
             .font(.system(size: 16, weight: note.isRoot ? .semibold : .medium, design: .monospaced))
             .minimumScaleFactor(0.7)
@@ -1431,6 +1458,24 @@ private func roundBtn(system: String, size: CGFloat, filled: Bool = false, actio
 
 /// Presents the system share sheet from UIKit. On iPad it must be a popover with a
 /// source, so it opens centred with no arrow; on iPhone it's the usual sheet.
+/// Apple's Bluetooth MIDI pairing screen, in a sheet with a Done button.
+enum BluetoothMIDIPresenter {
+  @MainActor static func present() {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first,
+          let root = (scene.windows.first(where: \.isKeyWindow) ?? scene.windows.first)?.rootViewController
+    else { return }
+    var top = root
+    while let next = top.presentedViewController { top = next }
+    let central = CABTMIDICentralViewController()
+    let nav = UINavigationController(rootViewController: central)
+    central.navigationItem.rightBarButtonItem = UIBarButtonItem(
+      systemItem: .done, primaryAction: UIAction { [weak nav] _ in nav?.dismiss(animated: true) })
+    nav.modalPresentationStyle = .formSheet
+    top.present(nav, animated: true)
+  }
+}
+
 enum SharePresenter {
   @MainActor static func present(_ url: URL) {
     let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }

@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Loopstack uses Bluetooth only to connect to Bluetooth MIDI keyboards and controllers you choose.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

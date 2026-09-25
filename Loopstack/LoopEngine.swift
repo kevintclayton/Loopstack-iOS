@@ -297,6 +297,10 @@ final class LoopEngine: ObservableObject {
 
   var drumName: String { DrumLibrary.find(drumId).name }
 
+  /// Connected MIDI sources' names, and the notes held on a MIDI keyboard (to light pads).
+  @Published var midiDevices: [String] = []
+  @Published var midiHeld: Set<Int> = []
+
   // MARK: Song mode state
   @Published var songBlocks: [SongBlock] = []
   /// Capturing the stack for Send to song, and how far through the cycle it is.
@@ -371,6 +375,10 @@ final class LoopEngine: ObservableObject {
   private let captureState = CaptureState()
   private let liveSynth = LiveSynth()
   private let liveArp = LiveArp()
+  // MIDI keyboards
+  private let midiIn = MIDIInput()
+  private var midiRouter: MIDIRouter?
+  private let midiDirect = LockedFlag()
   /// Tape on the drum bus. At the keys' nominal level the drum bus stays within ~1 dB
   /// (RMS) across the control, and its peaks don't rise.
   private let drumTapeSim = TapeSim()
@@ -407,6 +415,66 @@ final class LoopEngine: ObservableObject {
     startClock()
     observeAudioLifecycle()
     ensureRunning()
+    startMIDI()
+  }
+
+  // MARK: MIDI keyboards
+
+  /// Listens to every MIDI source. Plain keys go straight from the MIDI thread to the
+  /// synth (no wait on the UI); with the arp, chords, latch or sampler they go through
+  /// the same path as the pads.
+  private func startMIDI() {
+    let synth = liveSynth
+    let direct = midiDirect
+    let router = MIDIRouter(
+      isDirect: { direct.value },
+      directOn: { note, vel in
+        synth.noteOn(midi: note, velocity: vel, steal: true)
+        DispatchQueue.main.async { [weak self] in self?.midiHeld.insert(note) }
+      },
+      directOff: { note in
+        synth.noteOff(midi: note)
+        DispatchQueue.main.async { [weak self] in self?.midiHeld.remove(note) }
+      },
+      engineOn: { note, vel in
+        DispatchQueue.main.async { [weak self] in
+          guard let self else { return }
+          self.midiHeld.insert(note)
+          self.pressNote(note, velocity: vel)
+        }
+      },
+      engineOff: { note in
+        DispatchQueue.main.async { [weak self] in
+          guard let self else { return }
+          self.midiHeld.remove(note)
+          self.releaseNote(note)
+        }
+      },
+      bend: { synth.bend = $0 },
+      modWheel: { synth.modWheel = $0 },
+      panic: {
+        synth.allOff()
+        DispatchQueue.main.async { [weak self] in
+          guard let self else { return }
+          self.liveSampler.allOff()
+          for n in self.midiHeld { self.releaseNote(n) }
+          self.midiHeld.removeAll()
+        }
+      }
+    )
+    midiRouter = router
+    midiIn.onEvent = { router.handle($0) }
+    midiIn.onSourcesChanged = { [weak self] names in self?.midiDevices = names }
+    midiIn.start()
+    updateMIDIRoute()
+  }
+
+  /// Plain keys (no arp, chords or sampler, engine running) take the fast path. Called
+  /// from the UI tick and when those modes change.
+  private func updateMIDIRoute() {
+    let direct = engine.isRunning && inputMode == "keys" && !arpOn && !chordMode && !playSampler
+    if direct && !midiDirect.value { syncSynth() }  // fast notes use the current sound
+    midiDirect.value = direct
   }
 
   // MARK: Audio session and engine lifecycle
@@ -940,6 +1008,7 @@ final class LoopEngine: ObservableObject {
   }
   func setInputMode(_ mode: String) {
     inputMode = mode
+    defer { updateMIDIRoute() }
     if mode == "sampler" {
       playSampler = true
       liveSynth.allOff()
@@ -1266,7 +1335,7 @@ final class LoopEngine: ObservableObject {
     pushArp()
   }
 
-  func setChordMode(_ on: Bool) { chordMode = on }
+  func setChordMode(_ on: Bool) { chordMode = on; updateMIDIRoute() }
   func setChordSevenths(_ on: Bool) { chordSevenths = on }
 
   /// What a pad shows: its note, or in chord mode the chord it plays.
@@ -1290,6 +1359,7 @@ final class LoopEngine: ObservableObject {
 
   func setArpOn(_ on: Bool) {
     arpOn = on
+    defer { updateMIDIRoute() }
     if !on { clearLatch() }
     lastArpStep = -1
     arpOrigin = CACurrentMediaTime()
@@ -1968,6 +2038,7 @@ final class LoopEngine: ObservableObject {
       sessionElapsed = CACurrentMediaTime() - sessionStarted
     }
     if sendingToSong { sendTick() }
+    updateMIDIRoute()
     if songPlaying {
       let p = min(songLength, max(0, CACurrentMediaTime() - songStartedAt))
       if abs(p - songPosition) > 0.02 { songPosition = p }
@@ -2467,6 +2538,9 @@ final class LiveSynth: @unchecked Sendable {
     var glitch: Float = 0
     var release: Double = 0.09
     var fmAmount: Float = 0.5
+    /// MIDI pitch bend, -1...1 (±2 semitones), and mod wheel, 0...1 (vibrato).
+    var bend: Float = 0
+    var modWheel: Float = 0
   }
 
   /// Note changes are queued for the render thread instead of editing its voices
@@ -2496,11 +2570,30 @@ final class LiveSynth: @unchecked Sendable {
   /// step the level of the others (a step in a bass waveform is a click).
   private var voiceScale: Double = 0.22
   private var rng = RTRandom()
+  /// Pitch bend range in semitones (the usual keyboard default).
+  static let bendRange = 2.0
+  /// Frequency multiplier per sample for this buffer: pitch bend times mod-wheel
+  /// vibrato, both glided so moving a wheel never steps. The sampler reads it too.
+  static let pitchModCapacity = 8192
+  let pitchMod: UnsafeMutablePointer<Double> = {
+    let p = UnsafeMutablePointer<Double>.allocate(capacity: LiveSynth.pitchModCapacity)
+    p.initialize(repeating: 1, count: LiveSynth.pitchModCapacity)
+    return p
+  }()
+  /// Frames of `pitchMod` filled for the current buffer.
+  private(set) var pitchModFrames = 0
+  private var bendNow = 1.0
+  private var vibDepth = 0.0
+  private var vibPhase = 0.0
 
   init() {
     pending.reserveCapacity(256)
     inbox.reserveCapacity(256)
     voices.reserveCapacity(16)
+  }
+
+  deinit {
+    pitchMod.deallocate()
   }
 
   var sampleRate: Double {
@@ -2554,6 +2647,14 @@ final class LiveSynth: @unchecked Sendable {
   var glitch: Float {
     get { lock.lock(); defer { lock.unlock() }; return shared.glitch }
     set { lock.lock(); shared.glitch = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var bend: Float {
+    get { lock.lock(); defer { lock.unlock() }; return shared.bend }
+    set { lock.lock(); shared.bend = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var modWheel: Float {
+    get { lock.lock(); defer { lock.unlock() }; return shared.modWheel }
+    set { lock.lock(); shared.modWheel = newValue; paramsGen &+= 1; lock.unlock() }
   }
   var fmAmount: Float {
     get { lock.lock(); defer { lock.unlock() }; return shared.fmAmount }
@@ -2664,6 +2765,21 @@ final class LiveSynth: @unchecked Sendable {
       inbox.removeAll(keepingCapacity: true)
     }
     let sr = max(rp.sampleRate, 8000)
+    // Pitch bend and vibrato for this buffer: ~4 ms glide on both, vibrato at 5.5 Hz up to
+    // ±50 cents at full mod wheel.
+    let pmN = max(1, min(frames, Self.pitchModCapacity))
+    let bendTarget = pow(2, Double(max(-1, min(1, rp.bend))) * Self.bendRange / 12)
+    let depthTarget = Double(max(0, min(1, rp.modWheel)))
+    let glide = 1 - exp(-1 / (0.004 * sr))
+    let vibInc = 2 * Double.pi * 5.5 / sr
+    for f in 0..<pmN {
+      bendNow += (bendTarget - bendNow) * glide
+      vibDepth += (depthTarget - vibDepth) * glide
+      vibPhase += vibInc
+      if vibPhase > 2 * Double.pi { vibPhase -= 2 * Double.pi }
+      pitchMod[f] = bendNow * (1 + 0.0293 * vibDepth * sin(vibPhase))
+    }
+    pitchModFrames = pmN
     let dt = 1 / sr
     let preset = rp.preset
     let wave = rp.wave
@@ -2722,8 +2838,9 @@ final class LiveSynth: @unchecked Sendable {
         } else if v.env < 1 {
           v.env = min(1, v.env + dt / attack)
         }
-        let inc1 = freq * wander / sr
-        let inc2 = freq2 * wander / sr
+        let pm = pitchMod[min(f, pmN - 1)]
+        let inc1 = freq * wander * pm / sr
+        let inc2 = freq2 * wander * pm / sr
         var osc1: Double, osc2: Double
         if wave == .fm || wave2 == .fm {
           // Index: a snap (harder with velocity) that settles to a warm tone. Scaled up
@@ -3234,5 +3351,15 @@ struct SeededRandom: RandomNumberGenerator {
     z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
     z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
     return z ^ (z >> 31)
+  }
+}
+
+/// A Bool shared between the MIDI thread and the main thread.
+final class LockedFlag: @unchecked Sendable {
+  private let lock = NSLock()
+  private var v = false
+  var value: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return v }
+    set { lock.lock(); v = newValue; lock.unlock() }
   }
 }

@@ -26,6 +26,7 @@
 		BB000000000000000000015C /* AudioGraph.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000131 /* AudioGraph.swift */; };
 		BB0000000000000000000210 /* Song.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000200 /* Song.swift */; };
 		BB0000000000000000000230 /* IPadDesk.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000220 /* IPadDesk.swift */; };
+		BB0000000000000000000250 /* MIDIInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000240 /* MIDIInput.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -50,6 +51,7 @@
 		BB0000000000000000000131 /* AudioGraph.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioGraph.swift; sourceTree = "<group>"; };
 		BB0000000000000000000200 /* Song.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Song.swift; sourceTree = "<group>"; };
 		BB0000000000000000000220 /* IPadDesk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPadDesk.swift; sourceTree = "<group>"; };
+		BB0000000000000000000240 /* MIDIInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MIDIInput.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -89,6 +91,7 @@
 				BB0000000000000000000130 /* LiveMetro.swift */,
 				BB0000000000000000000200 /* Song.swift */,
 				BB0000000000000000000220 /* IPadDesk.swift */,
+				BB0000000000000000000240 /* MIDIInput.swift */,
 				BB0000000000000000000131 /* AudioGraph.swift */,
 				BB000000000000000000012A /* Samples */,
 				BB0000000000000000000125 /* Theme.swift */,
@@ -194,6 +197,7 @@
 				BB000000000000000000015B /* LiveMetro.swift in Sources */,
 				BB0000000000000000000210 /* Song.swift in Sources */,
 				BB0000000000000000000230 /* IPadDesk.swift in Sources */,
+				BB0000000000000000000250 /* MIDIInput.swift in Sources */,
 				BB000000000000000000015C /* AudioGraph.swift in Sources */,
 				BB0000000000000000000155 /* Theme.swift in Sources */,
 			);

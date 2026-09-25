@@ -134,7 +134,9 @@ final class LiveSampler: @unchecked Sendable {
   }
 
   /// Adds into a buffer already filled (usually zeros from the synth). Never hops threads.
-  func renderAdd(frames: Int, list: UnsafeMutablePointer<AudioBufferList>, dstRate: Double) {
+  /// `pitchMod`: the synth's per-sample pitch bend / vibrato for this buffer (MIDI).
+  func renderAdd(frames: Int, list: UnsafeMutablePointer<AudioBufferList>, dstRate: Double,
+                 pitchMod: UnsafePointer<Double>? = nil, pitchModFrames: Int = 0) {
     let buffers = UnsafeMutableAudioBufferListPointer(list)
     guard frames > 0, let data = buffers.first?.mData else { return }
     let left = data.assumingMemoryBound(to: Float.self)
@@ -180,7 +182,7 @@ final class LiveSampler: @unchecked Sendable {
         let s = (rSample[i0] * (1 - frac) + rSample[i1] * frac) * v.vel * Float(v.env) * 0.95
         left[f] += s
         if right != left { right[f] += s }
-        v.pos += step
+        v.pos += pitchModFrames > 0 ? step * pitchMod![min(f, pitchModFrames - 1)] : step
       }
       if v.env < 0.0008 || v.pos >= Double(n - 1) {
         voices.remove(at: i)
