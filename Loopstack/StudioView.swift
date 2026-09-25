@@ -5,6 +5,8 @@ struct StudioView: View {
   @StateObject private var engine = LoopEngine()
   /// Stack (the live loopstack) or Song (the arranged blocks).
   @State private var showSong = false
+  /// Regular width (iPad, full screen) gets the two-column layout.
+  @Environment(\.horizontalSizeClass) private var sizeClass
 
   var body: some View {
     ZStack {
@@ -28,7 +30,20 @@ struct StudioView: View {
     #endif
   }
 
-  private var desk: some View {
+  @ViewBuilder private var desk: some View {
+    if sizeClass == .regular {
+      IPadDesk(engine: engine, showSong: $showSong, header: header, modeSwitch: modeSwitch, exportRow: exportRow)
+        #if DEBUG
+        .onAppear { if engine.demoScene == "song" { showSong = true } }
+        .onChange(of: engine.demoScene) { showSong = $0 == "song" }
+        #endif
+    } else {
+      phoneDesk
+    }
+  }
+
+  /// iPhone (and narrow iPad windows): one scrolling column.
+  private var phoneDesk: some View {
     ScrollViewReader { proxy in
     ScrollView {
       VStack(alignment: .leading, spacing: 16) {
@@ -678,6 +693,7 @@ struct InstrumentView: View {
 
 struct KeyPadView: View {
   @ObservedObject var engine: LoopEngine
+  @Environment(\.horizontalSizeClass) private var sizeClass
 
   private var columns: Int { engine.scaleMode == .chromatic ? 6 : 4 }
 
@@ -772,7 +788,10 @@ struct KeyPadView: View {
             .lineLimit(1)
             .foregroundStyle(on ? LS.bg : (note.isRoot ? LS.fg : LS.muted))
             .frame(maxWidth: .infinity)
-            .frame(height: engine.scaleMode == .chromatic ? 52 : 64)
+            // Bigger pads on iPad, where there's room to play them with fingers spread.
+            .frame(height: sizeClass == .regular
+                   ? (engine.scaleMode == .chromatic ? 72 : 96)
+                   : (engine.scaleMode == .chromatic ? 52 : 64))
             .background(
               on ? LS.accent : (note.isRoot ? LS.surface2 : LS.bg),
               in: RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -1412,7 +1431,7 @@ private func roundBtn(system: String, size: CGFloat, filled: Bool = false, actio
 
 /// Presents the system share sheet from UIKit. On iPad it must be a popover with a
 /// source, so it opens centred with no arrow; on iPhone it's the usual sheet.
-private enum SharePresenter {
+enum SharePresenter {
   @MainActor static func present(_ url: URL) {
     let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
     guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first,

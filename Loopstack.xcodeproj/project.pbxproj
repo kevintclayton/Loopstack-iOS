@@ -25,6 +25,7 @@
 		BB000000000000000000015B /* LiveMetro.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000130 /* LiveMetro.swift */; };
 		BB000000000000000000015C /* AudioGraph.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000131 /* AudioGraph.swift */; };
 		BB0000000000000000000210 /* Song.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000200 /* Song.swift */; };
+		BB0000000000000000000230 /* IPadDesk.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000220 /* IPadDesk.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -48,6 +49,7 @@
 		BB0000000000000000000130 /* LiveMetro.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveMetro.swift; sourceTree = "<group>"; };
 		BB0000000000000000000131 /* AudioGraph.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioGraph.swift; sourceTree = "<group>"; };
 		BB0000000000000000000200 /* Song.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Song.swift; sourceTree = "<group>"; };
+		BB0000000000000000000220 /* IPadDesk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPadDesk.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -86,6 +88,7 @@
 				BB000000000000000000012F /* LiveLayers.swift */,
 				BB0000000000000000000130 /* LiveMetro.swift */,
 				BB0000000000000000000200 /* Song.swift */,
+				BB0000000000000000000220 /* IPadDesk.swift */,
 				BB0000000000000000000131 /* AudioGraph.swift */,
 				BB000000000000000000012A /* Samples */,
 				BB0000000000000000000125 /* Theme.swift */,
@@ -190,6 +193,7 @@
 				BB000000000000000000015A /* LiveLayers.swift in Sources */,
 				BB000000000000000000015B /* LiveMetro.swift in Sources */,
 				BB0000000000000000000210 /* Song.swift in Sources */,
+				BB0000000000000000000230 /* IPadDesk.swift in Sources */,
 				BB000000000000000000015C /* AudioGraph.swift in Sources */,
 				BB0000000000000000000155 /* Theme.swift in Sources */,
 			);
@@ -236,7 +240,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				DEVELOPMENT_TEAM = 7SVVWHNVT5;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Loopstack/Info.plist;
@@ -252,7 +256,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = app.loopstack.ios;
 				PRODUCT_NAME = Loopstack;
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -263,7 +267,7 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
 		};
@@ -273,7 +277,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				DEVELOPMENT_TEAM = 7SVVWHNVT5;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Loopstack/Info.plist;
@@ -289,7 +293,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = app.loopstack.ios;
 				PRODUCT_NAME = Loopstack;
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -300,7 +304,7 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};
