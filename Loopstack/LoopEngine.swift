@@ -300,6 +300,18 @@ final class LoopEngine: ObservableObject {
   /// The acoustic instrument playing the keys (nil = the synth), and one being loaded.
   @Published var acousticId: String?
   @Published var acousticLoading: String?
+  /// Sustain for the selected acoustic instrument (0...1, 0.5 = natural release), kept
+  /// per instrument; the synths keep their own Rel.
+  @Published var acousticSustain: Float = 0.5
+  private var acousticSustains: [String: Float] = [:]
+  /// Natural release of the loaded instrument (seconds), for the Sustain readout.
+  @Published var acousticNaturalRelease: Double = 0.3
+
+  func setAcousticSustain(_ v: Float) {
+    acousticSustain = v
+    if let id = acousticId { acousticSustains[id] = v }
+    acousticPlayer.setReleaseScale(AcousticPlayer.releaseScale(forSustain: v))
+  }
 
   /// Picks an acoustic instrument for the keys, or nil to go back to the synth. Loading
   /// decodes its recordings off the main thread; the synth keeps playing until it's ready.
@@ -318,6 +330,8 @@ final class LoopEngine: ObservableObject {
           self.liveSynth.allOff()
           player.setInstrument(inst)
           self.acousticId = id
+          self.acousticNaturalRelease = inst.release
+          self.setAcousticSustain(self.acousticSustains[id] ?? 0.5)
           self.acousticActive.value = true
           self.pushArp()
         }

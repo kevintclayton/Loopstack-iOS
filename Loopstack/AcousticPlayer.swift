@@ -130,6 +130,8 @@ final class AcousticPlayer: @unchecked Sendable {
   private var shared: AcousticInstrument?
   /// Tuning reference (A4, Hz), shared with the synth's Tune so the two sit together.
   private var sharedA4: Double = 440
+  /// Sustain: multiplies the instrument's natural release (1 = natural).
+  private var sharedReleaseScale: Double = 1
   private var pending: [Event] = []
   private var gen: UInt64 = 0
   private var seenGen: UInt64 = 0
@@ -138,6 +140,7 @@ final class AcousticPlayer: @unchecked Sendable {
   // Render thread.
   private var inst: AcousticInstrument?
   private var a4: Double = 440
+  private var releaseScale: Double = 1
   private var renderGen: UInt64 = 0
   private var inbox: [Event] = []
   private var voices: [Voice] = []
@@ -167,6 +170,20 @@ final class AcousticPlayer: @unchecked Sendable {
     lock.lock()
     sharedA4 = max(400, min(480, hz))
     lock.unlock()
+  }
+
+  /// Main thread: Sustain as a multiple of the instrument's natural release.
+  func setReleaseScale(_ scale: Double) {
+    lock.lock()
+    sharedReleaseScale = max(0.05, min(60, scale))
+    lock.unlock()
+  }
+
+  /// Sustain slider (0...1) to a release multiple: 0.5 is the instrument's natural
+  /// release, 0 about a tenth of it, 1 forty times (pedal down: pianos ring out fully).
+  static func releaseScale(forSustain v: Float) -> Double {
+    let x = Double(min(1, max(0, v)))
+    return x < 0.5 ? pow(0.1, (0.5 - x) / 0.5) : pow(40, (x - 0.5) / 0.5)
   }
 
   /// Frees instruments the renderer has let go of. Call from the UI tick.
@@ -259,6 +276,7 @@ final class AcousticPlayer: @unchecked Sendable {
         seenGen = gen
       }
       a4 = sharedA4
+      releaseScale = sharedReleaseScale
       swap(&pending, &inbox)
       lock.unlock()
       for e in inbox { apply(e) }
@@ -267,7 +285,7 @@ final class AcousticPlayer: @unchecked Sendable {
     guard let inst, !voices.isEmpty else { return }
     let sr = outRate
     let attack = 1 / (0.003 * sr)
-    let releaseCoef = exp(-1 / (max(0.02, inst.release) / 4.6 * sr))
+    let releaseCoef = exp(-1 / (max(0.02, inst.release * releaseScale) / 4.6 * sr))
     let killCoef = exp(-1 / (0.003 * sr))
     var i = 0
     while i < voices.count {

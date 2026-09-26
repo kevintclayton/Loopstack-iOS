@@ -580,6 +580,15 @@ struct InstrumentView: View {
     }
   }
 
+  /// The Sustain readout: seconds a note rings after key up, "pedal" at the top.
+  private var sustainLabel: String {
+    let v = engine.acousticSustain
+    if v >= 0.97 { return "pedal" }
+    if abs(v - 0.5) < 0.02 { return "natural" }
+    let secs = engine.acousticNaturalRelease * AcousticPlayer.releaseScale(forSustain: v)
+    return secs < 1 ? String(format: "%.2fs", secs) : String(format: "%.1fs", secs)
+  }
+
   /// Sampled acoustic instruments: pianos, strings, winds, mallets.
   private var acousticRow: some View {
     ScrollView(.horizontal, showsIndicators: false) {
@@ -694,6 +703,10 @@ struct InstrumentView: View {
         }
         FxRow(label: "Tune", value: Float((engine.instrumentTune - 428) / 24), display: "\(Int(engine.instrumentTune))hz") { v in
           engine.setInstrumentTune(428 + Double(v) * 24)
+        }
+        if engine.acousticId != nil {
+          // Acoustic: how long notes ring after you let go; far right is pedal down.
+          FxRow(label: "Sustain", value: engine.acousticSustain, display: sustainLabel) { engine.setAcousticSustain($0) }
         }
         if engine.acousticId == nil {
         FxRow(label: "Ring", value: engine.instrumentRing, display: "\(Int(engine.instrumentRing * 100))", onChange: engine.setInstrumentRing)
