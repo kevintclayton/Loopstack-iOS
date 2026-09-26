@@ -82,20 +82,39 @@ Your Carrd page (same URL for both).
 ---
 
 ## App Review Information: Notes
+Also paste this as the reply to App Review's message (attach the screen recording to the reply).
+
 ```
-Loopstack is a music looper for iPhone and iPad. No account, sign-in or network connection is needed.
+Hello, and thank you for reviewing Loopstack. Here is the information requested. A screen recording from a physical iPhone running the latest iOS is attached.
 
-Quick test:
-1. Tap "Tap to open", then tap the pads to play sounds.
-2. Press the red Record button: it records one full loop pass and adds it under Layers.
-3. Turn on Drums and pick a kit to add a beat.
-4. Tap "Send to song", then switch to Song at the top to hear the arrangement.
+1. SCREEN RECORDING
+Attached. It starts by launching the app from the Home Screen and shows the typical flow: opening the studio, playing the pads, recording loops, adding drums and effects, capturing a sample with the microphone, arranging blocks into a song, and exporting it.
+Loopstack has no account registration or login, no user-generated content shared with other users, and no in-app purchases or paid content inside the app. It is a paid app with every feature included.
 
+2. PURPOSE AND TARGET AUDIENCE
+Loopstack is a music-making app (a looper and beat maker) for musicians, producers and hobbyists who want to sketch and build songs on iPhone or iPad. It solves the problem of capturing a musical idea quickly: you play in-key pads (so you can't hit a wrong note), record loops that always capture one full pass in time with the beat, add drum grooves from seven built-in kits, shape the sound with effects such as tape saturation and wear, and arrange the result into a song you can export as a WAV file. It works fully offline and needs no account.
+
+3. SETUP AND ACCESSING THE MAIN FEATURES
+No setup, login or sample files are needed. Everything is available immediately:
+- Launch the app and tap "Tap to open".
+- Play the pads under "Sound & pads" (choose Keys, Bass, Pluck, Pad or Noise).
+- Press the red Record button and play: it records one full loop pass, which appears under "Layers".
+- Turn on the Drums switch, pick a kit (e.g. Dusty or Acoustic) and a groove.
+- Tap "Send to song", then switch to "Song" at the top to play the arrangement and tap "Export song".
+- Optional microphone use: tap "Sampler" then "Capture sample", or tap "Mic" to record your voice into a loop. The microphone is only used when the user starts one of these.
+- Optional: connect a USB or Bluetooth MIDI keyboard to play the instrument (the Bluetooth button under the pads opens Apple's standard Bluetooth MIDI pairing screen).
+
+4. EXTERNAL SERVICES
+None. Loopstack does not use any external services, servers, data providers, authentication services, payment processors, analytics, advertising or AI services. It makes no network connections. All audio is generated and processed on the device using Apple's frameworks (AVFoundation, CoreMIDI and CoreAudioKit for Bluetooth MIDI pairing). Purchases are handled by the App Store.
+
+5. REGIONAL DIFFERENCES
+None. The app functions identically in all regions, with the same features and content everywhere.
+
+6. REGULATED INDUSTRY / THIRD-PARTY MATERIAL
+The app does not operate in a regulated industry. Its only third-party material is a set of recorded drum samples from the Versilian Community Sample Library (VCSL), which is released under Creative Commons CC0 1.0 (public domain) and may be freely redistributed: https://github.com/sgossner/VCSL (license: https://github.com/sgossner/VCSL/blob/master/LICENSE). All other sounds are synthesized by the app itself.
+
+ADDITIONAL NOTES
 Background audio: while a loop or song is playing, audio continues when the app is backgrounded or the phone is locked (the app declares the audio background mode for this). When nothing is playing, the audio engine stops.
-
-Microphone: only used when the user turns on a mic feature (Mic input, or Capture sample in the Sampler). Audio is processed on the device and never uploaded. The mic is only heard back through headphones, never the built-in speaker.
-
+Microphone: the mic is only heard back through headphones, never the built-in speaker.
 Bluetooth: only used when the user taps Bluetooth to pair a MIDI keyboard.
-
-MIDI: USB and Bluetooth MIDI keyboards play the instrument (optional; the app works fully without one).
 ```
