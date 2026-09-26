@@ -613,6 +613,7 @@ enum AudioGraph {
     format: AVAudioFormat,
     synth: LiveSynth,
     sampler: LiveSampler,
+    acoustic: AcousticPlayer,
     tape: TapeSim,
     arp: LiveArp,
     clock: TransportClock,
@@ -620,16 +621,19 @@ enum AudioGraph {
   ) -> AVAudioSourceNode {
     let synth = synth
     let sampler = sampler
+    let acoustic = acoustic
     let tape = tape
     let arp = arp
     let clock = clock
     let outRate = outRate
     return AVAudioSourceNode(format: format) { _, ts, frameCount, abl -> OSStatus in
       // The arp places this buffer's steps on the synth before it renders.
-      arp.process(ts, frames: Int(frameCount), clock: clock, synth: synth)
+      arp.process(ts, frames: Int(frameCount), clock: clock, synth: synth, acoustic: acoustic)
       synth.render(frames: Int(frameCount), list: abl)
       sampler.renderAdd(frames: Int(frameCount), list: abl, dstRate: outRate,
                         pitchMod: synth.pitchMod, pitchModFrames: synth.pitchModFrames)
+      acoustic.renderAdd(frames: Int(frameCount), list: abl, dstRate: outRate,
+                         pitchMod: synth.pitchMod, pitchModFrames: synth.pitchModFrames)
       // Tape sits on the keys channel, before its delay and reverb.
       tape.process(abl, frames: Int(frameCount))
       return noErr

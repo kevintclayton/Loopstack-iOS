@@ -1,0 +1,198 @@
+{
+ "id": "flute",
+ "name": "Flute",
+ "release": 0.25,
+ "loop": true,
+ "zones": [
+  {
+   "root": 60,
+   "cents": -2.0,
+   "layer": 0,
+   "layers": 3,
+   "loopStart": 141515,
+   "loopEnd": 185220,
+   "loopMatch": 0.994,
+   "file": "000.caf"
+  },
+  {
+   "root": 60,
+   "cents": -0.3,
+   "layer": 2,
+   "layers": 3,
+   "loopStart": 103230,
+   "loopEnd": 185220,
+   "loopMatch": 0.907,
+   "file": "001.caf"
+  },
+  {
+   "root": 64,
+   "cents": -0.2,
+   "layer": 0,
+   "layers": 3,
+   "loopStart": 136670,
+   "loopEnd": 185220,
+   "loopMatch": 0.98,
+   "file": "002.caf"
+  },
+  {
+   "root": 64,
+   "cents": 1.0,
+   "layer": 2,
+   "layers": 3,
+   "loopStart": 138125,
+   "loopEnd": 185220,
+   "loopMatch": 0.998,
+   "file": "003.caf"
+  },
+  {
+   "root": 69,
+   "cents": 0.7,
+   "layer": 0,
+   "layers": 3,
+   "loopStart": 142720,
+   "loopEnd": 185220,
+   "loopMatch": 0.995,
+   "file": "004.caf"
+  },
+  {
+   "root": 69,
+   "cents": 1.3,
+   "layer": 2,
+   "layers": 3,
+   "loopStart": 125985,
+   "loopEnd": 185220,
+   "loopMatch": 0.997,
+   "file": "005.caf"
+  },
+  {
+   "root": 72,
+   "cents": -0.6,
+   "layer": 0,
+   "layers": 3,
+   "loopStart": 121925,
+   "loopEnd": 185220,
+   "loopMatch": 0.999,
+   "file": "006.caf"
+  },
+  {
+   "root": 72,
+   "cents": 0.6,
+   "layer": 2,
+   "layers": 3,
+   "loopStart": 119820,
+   "loopEnd": 185220,
+   "loopMatch": 0.995,
+   "file": "007.caf"
+  },
+  {
+   "root": 76,
+   "cents": 0.5,
+   "layer": 0,
+   "layers": 3,
+   "loopStart": 136320,
+   "loopEnd": 185220,
+   "loopMatch": 1.0,
+   "file": "008.caf"
+  },
+  {
+   "root": 76,
+   "cents": 0.8,
+   "layer": 2,
+   "layers": 3,
+   "loopStart": 137390,
+   "loopEnd": 185220,
+   "loopMatch": 0.999,
+   "file": "009.caf"
+  },
+  {
+   "root": 81,
+   "cents": 0.9,
+   "layer": 0,
+   "layers": 3,
+   "loopStart": 143275,
+   "loopEnd": 185220,
+   "loopMatch": 0.996,
+   "file": "010.caf"
+  },
+  {
+   "root": 81,
+   "cents": 0.3,
+   "layer": 2,
+   "layers": 3,
+   "loopStart": 99175,
+   "loopEnd": 185220,
+   "loopMatch": 0.999,
+   "file": "011.caf"
+  },
+  {
+   "root": 84,
+   "cents": 0.6,
+   "layer": 0,
+   "layers": 3,
+   "loopStart": 113960,
+   "loopEnd": 185220,
+   "loopMatch": 0.999,
+   "file": "012.caf"
+  },
+  {
+   "root": 84,
+   "cents": 0.6,
+   "layer": 1,
+   "layers": 3,
+   "loopStart": 143795,
+   "loopEnd": 185220,
+   "loopMatch": 0.996,
+   "file": "013.caf"
+  },
+  {
+   "root": 88,
+   "cents": 9.2,
+   "layer": 0,
+   "layers": 3,
+   "loopStart": 126420,
+   "loopEnd": 185220,
+   "loopMatch": 0.979,
+   "file": "014.caf"
+  },
+  {
+   "root": 88,
+   "cents": 0.4,
+   "layer": 1,
+   "layers": 3,
+   "loopStart": 145115,
+   "loopEnd": 185220,
+   "loopMatch": 0.995,
+   "file": "015.caf"
+  },
+  {
+   "root": 93,
+   "cents": 1.7,
+   "layer": 0,
+   "layers": 3,
+   "loopStart": 128465,
+   "loopEnd": 185220,
+   "loopMatch": 0.999,
+   "file": "016.caf"
+  },
+  {
+   "root": 93,
+   "cents": 1.2,
+   "layer": 2,
+   "layers": 3,
+   "loopStart": 130320,
+   "loopEnd": 185220,
+   "loopMatch": 1.0,
+   "file": "017.caf"
+  },
+  {
+   "root": 96,
+   "cents": 2.5,
+   "layer": 0,
+   "layers": 3,
+   "loopStart": 137790,
+   "loopEnd": 185220,
+   "loopMatch": 1.0,
+   "file": "018.caf"
+  }
+ ]
+}

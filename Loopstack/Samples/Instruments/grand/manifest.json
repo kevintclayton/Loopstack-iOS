@@ -1,0 +1,890 @@
+{
+ "id": "grand",
+ "name": "Grand Piano",
+ "release": 0.35,
+ "loop": false,
+ "zones": [
+  {
+   "root": 22,
+   "cents": 12.4,
+   "layer": 0,
+   "layers": 3,
+   "file": "000.m4a"
+  },
+  {
+   "root": 22,
+   "cents": 16.3,
+   "layer": 1,
+   "layers": 3,
+   "file": "001.m4a"
+  },
+  {
+   "root": 22,
+   "cents": 26.8,
+   "layer": 2,
+   "layers": 3,
+   "file": "002.m4a"
+  },
+  {
+   "root": 24,
+   "cents": -2.7,
+   "layer": 0,
+   "layers": 3,
+   "file": "003.m4a"
+  },
+  {
+   "root": 24,
+   "cents": -5.0,
+   "layer": 1,
+   "layers": 3,
+   "file": "004.m4a"
+  },
+  {
+   "root": 24,
+   "cents": -4.1,
+   "layer": 2,
+   "layers": 3,
+   "file": "005.m4a"
+  },
+  {
+   "root": 26,
+   "cents": 16.5,
+   "layer": 0,
+   "layers": 3,
+   "file": "006.m4a"
+  },
+  {
+   "root": 26,
+   "cents": 17.2,
+   "layer": 1,
+   "layers": 3,
+   "file": "007.m4a"
+  },
+  {
+   "root": 26,
+   "cents": 17.1,
+   "layer": 2,
+   "layers": 3,
+   "file": "008.m4a"
+  },
+  {
+   "root": 28,
+   "cents": 5.4,
+   "layer": 0,
+   "layers": 3,
+   "file": "009.m4a"
+  },
+  {
+   "root": 28,
+   "cents": 7.0,
+   "layer": 1,
+   "layers": 3,
+   "file": "010.m4a"
+  },
+  {
+   "root": 28,
+   "cents": 6.1,
+   "layer": 2,
+   "layers": 3,
+   "file": "011.m4a"
+  },
+  {
+   "root": 30,
+   "cents": 23.2,
+   "layer": 0,
+   "layers": 3,
+   "file": "012.m4a"
+  },
+  {
+   "root": 30,
+   "cents": 28.4,
+   "layer": 1,
+   "layers": 3,
+   "file": "013.m4a"
+  },
+  {
+   "root": 30,
+   "cents": 29.6,
+   "layer": 2,
+   "layers": 3,
+   "file": "014.m4a"
+  },
+  {
+   "root": 32,
+   "cents": 19.8,
+   "layer": 0,
+   "layers": 3,
+   "file": "015.m4a"
+  },
+  {
+   "root": 32,
+   "cents": 21.4,
+   "layer": 1,
+   "layers": 3,
+   "file": "016.m4a"
+  },
+  {
+   "root": 32,
+   "cents": 22.0,
+   "layer": 2,
+   "layers": 3,
+   "file": "017.m4a"
+  },
+  {
+   "root": 34,
+   "cents": 18.1,
+   "layer": 0,
+   "layers": 3,
+   "file": "018.m4a"
+  },
+  {
+   "root": 34,
+   "cents": 20.4,
+   "layer": 1,
+   "layers": 3,
+   "file": "019.m4a"
+  },
+  {
+   "root": 34,
+   "cents": 19.2,
+   "layer": 2,
+   "layers": 3,
+   "file": "020.m4a"
+  },
+  {
+   "root": 36,
+   "cents": 8.9,
+   "layer": 0,
+   "layers": 3,
+   "file": "021.m4a"
+  },
+  {
+   "root": 36,
+   "cents": 7.7,
+   "layer": 1,
+   "layers": 3,
+   "file": "022.m4a"
+  },
+  {
+   "root": 36,
+   "cents": 3.5,
+   "layer": 2,
+   "layers": 3,
+   "file": "023.m4a"
+  },
+  {
+   "root": 38,
+   "cents": -0.9,
+   "layer": 0,
+   "layers": 3,
+   "file": "024.m4a"
+  },
+  {
+   "root": 38,
+   "cents": 0.9,
+   "layer": 1,
+   "layers": 3,
+   "file": "025.m4a"
+  },
+  {
+   "root": 38,
+   "cents": 3.9,
+   "layer": 2,
+   "layers": 3,
+   "file": "026.m4a"
+  },
+  {
+   "root": 40,
+   "cents": 4.2,
+   "layer": 0,
+   "layers": 3,
+   "file": "027.m4a"
+  },
+  {
+   "root": 40,
+   "cents": 8.9,
+   "layer": 1,
+   "layers": 3,
+   "file": "028.m4a"
+  },
+  {
+   "root": 40,
+   "cents": 11.6,
+   "layer": 2,
+   "layers": 3,
+   "file": "029.m4a"
+  },
+  {
+   "root": 42,
+   "cents": 4.4,
+   "layer": 0,
+   "layers": 3,
+   "file": "030.m4a"
+  },
+  {
+   "root": 42,
+   "cents": 2.2,
+   "layer": 1,
+   "layers": 3,
+   "file": "031.m4a"
+  },
+  {
+   "root": 42,
+   "cents": 2.9,
+   "layer": 2,
+   "layers": 3,
+   "file": "032.m4a"
+  },
+  {
+   "root": 44,
+   "cents": 6.0,
+   "layer": 0,
+   "layers": 3,
+   "file": "033.m4a"
+  },
+  {
+   "root": 44,
+   "cents": 7.7,
+   "layer": 1,
+   "layers": 3,
+   "file": "034.m4a"
+  },
+  {
+   "root": 44,
+   "cents": 10.8,
+   "layer": 2,
+   "layers": 3,
+   "file": "035.m4a"
+  },
+  {
+   "root": 46,
+   "cents": -3.3,
+   "layer": 0,
+   "layers": 3,
+   "file": "036.m4a"
+  },
+  {
+   "root": 46,
+   "cents": -0.9,
+   "layer": 1,
+   "layers": 3,
+   "file": "037.m4a"
+  },
+  {
+   "root": 46,
+   "cents": 0.9,
+   "layer": 2,
+   "layers": 3,
+   "file": "038.m4a"
+  },
+  {
+   "root": 48,
+   "cents": 2.8,
+   "layer": 0,
+   "layers": 3,
+   "file": "039.m4a"
+  },
+  {
+   "root": 48,
+   "cents": 8.1,
+   "layer": 1,
+   "layers": 3,
+   "file": "040.m4a"
+  },
+  {
+   "root": 48,
+   "cents": 9.2,
+   "layer": 2,
+   "layers": 3,
+   "file": "041.m4a"
+  },
+  {
+   "root": 50,
+   "cents": 2.6,
+   "layer": 0,
+   "layers": 3,
+   "file": "042.m4a"
+  },
+  {
+   "root": 50,
+   "cents": 7.1,
+   "layer": 1,
+   "layers": 3,
+   "file": "043.m4a"
+  },
+  {
+   "root": 50,
+   "cents": 8.7,
+   "layer": 2,
+   "layers": 3,
+   "file": "044.m4a"
+  },
+  {
+   "root": 52,
+   "cents": 4.6,
+   "layer": 0,
+   "layers": 3,
+   "file": "045.m4a"
+  },
+  {
+   "root": 52,
+   "cents": 10.6,
+   "layer": 1,
+   "layers": 3,
+   "file": "046.m4a"
+  },
+  {
+   "root": 52,
+   "cents": 12.3,
+   "layer": 2,
+   "layers": 3,
+   "file": "047.m4a"
+  },
+  {
+   "root": 54,
+   "cents": 4.5,
+   "layer": 0,
+   "layers": 3,
+   "file": "048.m4a"
+  },
+  {
+   "root": 54,
+   "cents": 9.5,
+   "layer": 1,
+   "layers": 3,
+   "file": "049.m4a"
+  },
+  {
+   "root": 54,
+   "cents": 9.4,
+   "layer": 2,
+   "layers": 3,
+   "file": "050.m4a"
+  },
+  {
+   "root": 56,
+   "cents": 0.1,
+   "layer": 0,
+   "layers": 3,
+   "file": "051.m4a"
+  },
+  {
+   "root": 56,
+   "cents": 3.2,
+   "layer": 1,
+   "layers": 3,
+   "file": "052.m4a"
+  },
+  {
+   "root": 56,
+   "cents": 4.0,
+   "layer": 2,
+   "layers": 3,
+   "file": "053.m4a"
+  },
+  {
+   "root": 58,
+   "cents": 2.6,
+   "layer": 0,
+   "layers": 3,
+   "file": "054.m4a"
+  },
+  {
+   "root": 58,
+   "cents": 5.8,
+   "layer": 1,
+   "layers": 3,
+   "file": "055.m4a"
+  },
+  {
+   "root": 58,
+   "cents": 9.4,
+   "layer": 2,
+   "layers": 3,
+   "file": "056.m4a"
+  },
+  {
+   "root": 60,
+   "cents": 3.4,
+   "layer": 0,
+   "layers": 3,
+   "file": "057.m4a"
+  },
+  {
+   "root": 60,
+   "cents": 6.0,
+   "layer": 1,
+   "layers": 3,
+   "file": "058.m4a"
+  },
+  {
+   "root": 60,
+   "cents": 8.0,
+   "layer": 2,
+   "layers": 3,
+   "file": "059.m4a"
+  },
+  {
+   "root": 62,
+   "cents": 1.9,
+   "layer": 0,
+   "layers": 3,
+   "file": "060.m4a"
+  },
+  {
+   "root": 62,
+   "cents": 5.4,
+   "layer": 1,
+   "layers": 3,
+   "file": "061.m4a"
+  },
+  {
+   "root": 62,
+   "cents": 10.0,
+   "layer": 2,
+   "layers": 3,
+   "file": "062.m4a"
+  },
+  {
+   "root": 64,
+   "cents": 1.4,
+   "layer": 0,
+   "layers": 3,
+   "file": "063.m4a"
+  },
+  {
+   "root": 64,
+   "cents": 6.9,
+   "layer": 1,
+   "layers": 3,
+   "file": "064.m4a"
+  },
+  {
+   "root": 64,
+   "cents": 10.5,
+   "layer": 2,
+   "layers": 3,
+   "file": "065.m4a"
+  },
+  {
+   "root": 66,
+   "cents": 5.3,
+   "layer": 0,
+   "layers": 3,
+   "file": "066.m4a"
+  },
+  {
+   "root": 66,
+   "cents": 17.0,
+   "layer": 1,
+   "layers": 3,
+   "file": "067.m4a"
+  },
+  {
+   "root": 66,
+   "cents": 19.0,
+   "layer": 2,
+   "layers": 3,
+   "file": "068.m4a"
+  },
+  {
+   "root": 68,
+   "cents": 3.2,
+   "layer": 0,
+   "layers": 3,
+   "file": "069.m4a"
+  },
+  {
+   "root": 68,
+   "cents": 15.8,
+   "layer": 1,
+   "layers": 3,
+   "file": "070.m4a"
+  },
+  {
+   "root": 68,
+   "cents": 18.5,
+   "layer": 2,
+   "layers": 3,
+   "file": "071.m4a"
+  },
+  {
+   "root": 70,
+   "cents": 6.4,
+   "layer": 0,
+   "layers": 3,
+   "file": "072.m4a"
+  },
+  {
+   "root": 70,
+   "cents": 8.6,
+   "layer": 1,
+   "layers": 3,
+   "file": "073.m4a"
+  },
+  {
+   "root": 70,
+   "cents": 9.7,
+   "layer": 2,
+   "layers": 3,
+   "file": "074.m4a"
+  },
+  {
+   "root": 72,
+   "cents": 8.2,
+   "layer": 0,
+   "layers": 3,
+   "file": "075.m4a"
+  },
+  {
+   "root": 72,
+   "cents": 21.6,
+   "layer": 1,
+   "layers": 3,
+   "file": "076.m4a"
+  },
+  {
+   "root": 72,
+   "cents": 26.9,
+   "layer": 2,
+   "layers": 3,
+   "file": "077.m4a"
+  },
+  {
+   "root": 74,
+   "cents": 1.2,
+   "layer": 0,
+   "layers": 3,
+   "file": "078.m4a"
+  },
+  {
+   "root": 74,
+   "cents": 3.0,
+   "layer": 1,
+   "layers": 3,
+   "file": "079.m4a"
+  },
+  {
+   "root": 74,
+   "cents": 12.0,
+   "layer": 2,
+   "layers": 3,
+   "file": "080.m4a"
+  },
+  {
+   "root": 76,
+   "cents": -1.0,
+   "layer": 0,
+   "layers": 3,
+   "file": "081.m4a"
+  },
+  {
+   "root": 76,
+   "cents": 2.1,
+   "layer": 1,
+   "layers": 3,
+   "file": "082.m4a"
+  },
+  {
+   "root": 76,
+   "cents": 4.8,
+   "layer": 2,
+   "layers": 3,
+   "file": "083.m4a"
+  },
+  {
+   "root": 78,
+   "cents": -2.2,
+   "layer": 0,
+   "layers": 3,
+   "file": "084.m4a"
+  },
+  {
+   "root": 78,
+   "cents": 3.6,
+   "layer": 1,
+   "layers": 3,
+   "file": "085.m4a"
+  },
+  {
+   "root": 78,
+   "cents": 16.4,
+   "layer": 2,
+   "layers": 3,
+   "file": "086.m4a"
+  },
+  {
+   "root": 80,
+   "cents": 0.3,
+   "layer": 0,
+   "layers": 3,
+   "file": "087.m4a"
+  },
+  {
+   "root": 80,
+   "cents": 1.8,
+   "layer": 1,
+   "layers": 3,
+   "file": "088.m4a"
+  },
+  {
+   "root": 80,
+   "cents": 5.7,
+   "layer": 2,
+   "layers": 3,
+   "file": "089.m4a"
+  },
+  {
+   "root": 82,
+   "cents": -1.1,
+   "layer": 0,
+   "layers": 3,
+   "file": "090.m4a"
+  },
+  {
+   "root": 82,
+   "cents": 5.2,
+   "layer": 1,
+   "layers": 3,
+   "file": "091.m4a"
+  },
+  {
+   "root": 82,
+   "cents": 7.2,
+   "layer": 2,
+   "layers": 3,
+   "file": "092.m4a"
+  },
+  {
+   "root": 84,
+   "cents": 4.6,
+   "layer": 0,
+   "layers": 3,
+   "file": "093.m4a"
+  },
+  {
+   "root": 84,
+   "cents": 7.6,
+   "layer": 1,
+   "layers": 3,
+   "file": "094.m4a"
+  },
+  {
+   "root": 84,
+   "cents": 10.5,
+   "layer": 2,
+   "layers": 3,
+   "file": "095.m4a"
+  },
+  {
+   "root": 86,
+   "cents": 2.6,
+   "layer": 0,
+   "layers": 3,
+   "file": "096.m4a"
+  },
+  {
+   "root": 86,
+   "cents": 3.0,
+   "layer": 1,
+   "layers": 3,
+   "file": "097.m4a"
+  },
+  {
+   "root": 86,
+   "cents": 2.7,
+   "layer": 2,
+   "layers": 3,
+   "file": "098.m4a"
+  },
+  {
+   "root": 88,
+   "cents": 3.1,
+   "layer": 0,
+   "layers": 3,
+   "file": "099.m4a"
+  },
+  {
+   "root": 88,
+   "cents": 3.6,
+   "layer": 1,
+   "layers": 3,
+   "file": "100.m4a"
+  },
+  {
+   "root": 88,
+   "cents": 3.3,
+   "layer": 2,
+   "layers": 3,
+   "file": "101.m4a"
+  },
+  {
+   "root": 90,
+   "cents": -0.6,
+   "layer": 0,
+   "layers": 3,
+   "file": "102.m4a"
+  },
+  {
+   "root": 90,
+   "cents": -0.7,
+   "layer": 1,
+   "layers": 3,
+   "file": "103.m4a"
+  },
+  {
+   "root": 90,
+   "cents": 0.6,
+   "layer": 2,
+   "layers": 3,
+   "file": "104.m4a"
+  },
+  {
+   "root": 92,
+   "cents": 3.4,
+   "layer": 0,
+   "layers": 3,
+   "file": "105.m4a"
+  },
+  {
+   "root": 92,
+   "cents": 2.1,
+   "layer": 1,
+   "layers": 3,
+   "file": "106.m4a"
+  },
+  {
+   "root": 92,
+   "cents": 3.4,
+   "layer": 2,
+   "layers": 3,
+   "file": "107.m4a"
+  },
+  {
+   "root": 94,
+   "cents": 1.8,
+   "layer": 0,
+   "layers": 3,
+   "file": "108.m4a"
+  },
+  {
+   "root": 94,
+   "cents": 3.2,
+   "layer": 1,
+   "layers": 3,
+   "file": "109.m4a"
+  },
+  {
+   "root": 94,
+   "cents": 5.3,
+   "layer": 2,
+   "layers": 3,
+   "file": "110.m4a"
+  },
+  {
+   "root": 96,
+   "cents": 14.4,
+   "layer": 0,
+   "layers": 3,
+   "file": "111.m4a"
+  },
+  {
+   "root": 96,
+   "cents": 15.0,
+   "layer": 1,
+   "layers": 3,
+   "file": "112.m4a"
+  },
+  {
+   "root": 96,
+   "cents": 14.4,
+   "layer": 2,
+   "layers": 3,
+   "file": "113.m4a"
+  },
+  {
+   "root": 98,
+   "cents": 11.5,
+   "layer": 0,
+   "layers": 3,
+   "file": "114.m4a"
+  },
+  {
+   "root": 98,
+   "cents": 10.4,
+   "layer": 1,
+   "layers": 3,
+   "file": "115.m4a"
+  },
+  {
+   "root": 98,
+   "cents": 9.2,
+   "layer": 2,
+   "layers": 3,
+   "file": "116.m4a"
+  },
+  {
+   "root": 100,
+   "cents": 14.0,
+   "layer": 0,
+   "layers": 3,
+   "file": "117.m4a"
+  },
+  {
+   "root": 100,
+   "cents": 14.8,
+   "layer": 1,
+   "layers": 3,
+   "file": "118.m4a"
+  },
+  {
+   "root": 100,
+   "cents": 15.6,
+   "layer": 2,
+   "layers": 3,
+   "file": "119.m4a"
+  },
+  {
+   "root": 102,
+   "cents": 11.5,
+   "layer": 0,
+   "layers": 3,
+   "file": "120.m4a"
+  },
+  {
+   "root": 102,
+   "cents": 12.3,
+   "layer": 1,
+   "layers": 3,
+   "file": "121.m4a"
+  },
+  {
+   "root": 102,
+   "cents": 11.5,
+   "layer": 2,
+   "layers": 3,
+   "file": "122.m4a"
+  },
+  {
+   "root": 104,
+   "cents": 23.7,
+   "layer": 0,
+   "layers": 3,
+   "file": "123.m4a"
+  },
+  {
+   "root": 104,
+   "cents": 20.6,
+   "layer": 1,
+   "layers": 3,
+   "file": "124.m4a"
+  },
+  {
+   "root": 104,
+   "cents": 23.8,
+   "layer": 2,
+   "layers": 3,
+   "file": "125.m4a"
+  }
+ ]
+}

@@ -1,0 +1,328 @@
+{
+ "id": "organ",
+ "name": "Organ",
+ "release": 0.25,
+ "loop": true,
+ "zones": [
+  {
+   "root": 36,
+   "cents": -8.3,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 84870,
+   "loopEnd": 185220,
+   "loopMatch": 0.981,
+   "file": "000.caf"
+  },
+  {
+   "root": 36,
+   "cents": 1.1,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 87485,
+   "loopEnd": 185220,
+   "loopMatch": 0.99,
+   "file": "001.caf"
+  },
+  {
+   "root": 39,
+   "cents": 17.3,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 111510,
+   "loopEnd": 185220,
+   "loopMatch": 0.965,
+   "file": "002.caf"
+  },
+  {
+   "root": 42,
+   "cents": 45.5,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 133620,
+   "loopEnd": 185220,
+   "loopMatch": 0.977,
+   "file": "003.caf"
+  },
+  {
+   "root": 45,
+   "cents": -6.9,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 125460,
+   "loopEnd": 185220,
+   "loopMatch": 0.999,
+   "file": "004.caf"
+  },
+  {
+   "root": 45,
+   "cents": 4.7,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 85330,
+   "loopEnd": 185220,
+   "loopMatch": 0.786,
+   "file": "005.caf"
+  },
+  {
+   "root": 48,
+   "cents": 21.5,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 131250,
+   "loopEnd": 185220,
+   "loopMatch": 1.0,
+   "file": "006.caf"
+  },
+  {
+   "root": 48,
+   "cents": -9.3,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 120830,
+   "loopEnd": 185220,
+   "loopMatch": 0.931,
+   "file": "007.caf"
+  },
+  {
+   "root": 51,
+   "cents": 5.2,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 98860,
+   "loopEnd": 185220,
+   "loopMatch": 0.998,
+   "file": "008.caf"
+  },
+  {
+   "root": 51,
+   "cents": -3.0,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 131585,
+   "loopEnd": 185220,
+   "loopMatch": 0.922,
+   "file": "009.caf"
+  },
+  {
+   "root": 54,
+   "cents": 4.0,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 91110,
+   "loopEnd": 185220,
+   "loopMatch": 1.0,
+   "file": "010.caf"
+  },
+  {
+   "root": 54,
+   "cents": 0.6,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 124040,
+   "loopEnd": 185220,
+   "loopMatch": 0.994,
+   "file": "011.caf"
+  },
+  {
+   "root": 57,
+   "cents": 3.7,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 126830,
+   "loopEnd": 185220,
+   "loopMatch": 0.999,
+   "file": "012.caf"
+  },
+  {
+   "root": 57,
+   "cents": 0.3,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 88925,
+   "loopEnd": 185220,
+   "loopMatch": 0.997,
+   "file": "013.caf"
+  },
+  {
+   "root": 58,
+   "cents": 2.3,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 86135,
+   "loopEnd": 185220,
+   "loopMatch": 0.998,
+   "file": "014.caf"
+  },
+  {
+   "root": 60,
+   "cents": 3.9,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 131690,
+   "loopEnd": 185220,
+   "loopMatch": 0.998,
+   "file": "015.caf"
+  },
+  {
+   "root": 60,
+   "cents": 0.4,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 145085,
+   "loopEnd": 185220,
+   "loopMatch": 0.978,
+   "file": "016.caf"
+  },
+  {
+   "root": 63,
+   "cents": 1.3,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 144260,
+   "loopEnd": 185220,
+   "loopMatch": 0.999,
+   "file": "017.caf"
+  },
+  {
+   "root": 63,
+   "cents": 5.2,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 83310,
+   "loopEnd": 185220,
+   "loopMatch": 0.999,
+   "file": "018.caf"
+  },
+  {
+   "root": 66,
+   "cents": 1.1,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 142690,
+   "loopEnd": 185220,
+   "loopMatch": 0.999,
+   "file": "019.caf"
+  },
+  {
+   "root": 66,
+   "cents": -4.6,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 121165,
+   "loopEnd": 185220,
+   "loopMatch": 0.997,
+   "file": "020.caf"
+  },
+  {
+   "root": 66,
+   "cents": -4.6,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 122550,
+   "loopEnd": 185220,
+   "loopMatch": 0.932,
+   "file": "021.caf"
+  },
+  {
+   "root": 69,
+   "cents": -2.3,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 107885,
+   "loopEnd": 185220,
+   "loopMatch": 0.998,
+   "file": "022.caf"
+  },
+  {
+   "root": 72,
+   "cents": -2.6,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 120190,
+   "loopEnd": 185220,
+   "loopMatch": 0.998,
+   "file": "023.caf"
+  },
+  {
+   "root": 75,
+   "cents": -3.3,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 141345,
+   "loopEnd": 185220,
+   "loopMatch": 1.0,
+   "file": "024.caf"
+  },
+  {
+   "root": 78,
+   "cents": 1.1,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 142245,
+   "loopEnd": 185220,
+   "loopMatch": 0.971,
+   "file": "025.caf"
+  },
+  {
+   "root": 81,
+   "cents": -6.3,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 93000,
+   "loopEnd": 185220,
+   "loopMatch": 0.998,
+   "file": "026.caf"
+  },
+  {
+   "root": 84,
+   "cents": -2.3,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 144185,
+   "loopEnd": 185220,
+   "loopMatch": 1.0,
+   "file": "027.caf"
+  },
+  {
+   "root": 87,
+   "cents": -8.2,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 104710,
+   "loopEnd": 185220,
+   "loopMatch": 0.997,
+   "file": "028.caf"
+  },
+  {
+   "root": 90,
+   "cents": -1.5,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 135290,
+   "loopEnd": 185220,
+   "loopMatch": 0.997,
+   "file": "029.caf"
+  },
+  {
+   "root": 93,
+   "cents": -2.4,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 107945,
+   "loopEnd": 185220,
+   "loopMatch": 0.995,
+   "file": "030.caf"
+  },
+  {
+   "root": 96,
+   "cents": 0.7,
+   "layer": 0,
+   "layers": 1,
+   "loopStart": 129855,
+   "loopEnd": 185220,
+   "loopMatch": 0.993,
+   "file": "031.caf"
+  }
+ ]
+}

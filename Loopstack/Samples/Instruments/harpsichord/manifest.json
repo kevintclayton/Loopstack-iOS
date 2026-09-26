@@ -1,0 +1,204 @@
+{
+ "id": "harpsichord",
+ "name": "Harpsichord",
+ "release": 0.2,
+ "loop": false,
+ "zones": [
+  {
+   "root": 26,
+   "cents": 0.8,
+   "layer": 0,
+   "layers": 1,
+   "file": "000.m4a"
+  },
+  {
+   "root": 32,
+   "cents": 3.8,
+   "layer": 0,
+   "layers": 1,
+   "file": "001.m4a"
+  },
+  {
+   "root": 34,
+   "cents": 2.8,
+   "layer": 0,
+   "layers": 1,
+   "file": "002.m4a"
+  },
+  {
+   "root": 36,
+   "cents": 12.5,
+   "layer": 0,
+   "layers": 1,
+   "file": "003.m4a"
+  },
+  {
+   "root": 38,
+   "cents": 4.1,
+   "layer": 0,
+   "layers": 1,
+   "file": "004.m4a"
+  },
+  {
+   "root": 40,
+   "cents": 3.0,
+   "layer": 0,
+   "layers": 1,
+   "file": "005.m4a"
+  },
+  {
+   "root": 42,
+   "cents": 1.8,
+   "layer": 0,
+   "layers": 1,
+   "file": "006.m4a"
+  },
+  {
+   "root": 44,
+   "cents": 1.8,
+   "layer": 0,
+   "layers": 1,
+   "file": "007.m4a"
+  },
+  {
+   "root": 46,
+   "cents": 3.5,
+   "layer": 0,
+   "layers": 1,
+   "file": "008.m4a"
+  },
+  {
+   "root": 48,
+   "cents": 4.0,
+   "layer": 0,
+   "layers": 1,
+   "file": "009.m4a"
+  },
+  {
+   "root": 50,
+   "cents": 2.2,
+   "layer": 0,
+   "layers": 1,
+   "file": "010.m4a"
+  },
+  {
+   "root": 52,
+   "cents": 7.7,
+   "layer": 0,
+   "layers": 1,
+   "file": "011.m4a"
+  },
+  {
+   "root": 54,
+   "cents": 8.3,
+   "layer": 0,
+   "layers": 1,
+   "file": "012.m4a"
+  },
+  {
+   "root": 56,
+   "cents": 6.3,
+   "layer": 0,
+   "layers": 1,
+   "file": "013.m4a"
+  },
+  {
+   "root": 58,
+   "cents": 5.0,
+   "layer": 0,
+   "layers": 1,
+   "file": "014.m4a"
+  },
+  {
+   "root": 60,
+   "cents": 5.9,
+   "layer": 0,
+   "layers": 1,
+   "file": "015.m4a"
+  },
+  {
+   "root": 62,
+   "cents": 2.5,
+   "layer": 0,
+   "layers": 1,
+   "file": "016.m4a"
+  },
+  {
+   "root": 64,
+   "cents": 5.3,
+   "layer": 0,
+   "layers": 1,
+   "file": "017.m4a"
+  },
+  {
+   "root": 66,
+   "cents": 5.1,
+   "layer": 0,
+   "layers": 1,
+   "file": "018.m4a"
+  },
+  {
+   "root": 68,
+   "cents": 5.4,
+   "layer": 0,
+   "layers": 1,
+   "file": "019.m4a"
+  },
+  {
+   "root": 70,
+   "cents": 4.7,
+   "layer": 0,
+   "layers": 1,
+   "file": "020.m4a"
+  },
+  {
+   "root": 72,
+   "cents": 4.1,
+   "layer": 0,
+   "layers": 1,
+   "file": "021.m4a"
+  },
+  {
+   "root": 74,
+   "cents": 5.4,
+   "layer": 0,
+   "layers": 1,
+   "file": "022.m4a"
+  },
+  {
+   "root": 76,
+   "cents": 6.5,
+   "layer": 0,
+   "layers": 1,
+   "file": "023.m4a"
+  },
+  {
+   "root": 78,
+   "cents": 4.7,
+   "layer": 0,
+   "layers": 1,
+   "file": "024.m4a"
+  },
+  {
+   "root": 80,
+   "cents": 3.7,
+   "layer": 0,
+   "layers": 1,
+   "file": "025.m4a"
+  },
+  {
+   "root": 82,
+   "cents": 1.2,
+   "layer": 0,
+   "layers": 1,
+   "file": "026.m4a"
+  },
+  {
+   "root": 84,
+   "cents": 2.6,
+   "layer": 0,
+   "layers": 1,
+   "file": "027.m4a"
+  }
+ ]
+}

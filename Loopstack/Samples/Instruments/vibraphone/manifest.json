@@ -1,0 +1,148 @@
+{
+ "id": "vibraphone",
+ "name": "Vibraphone",
+ "release": 0.4,
+ "loop": false,
+ "zones": [
+  {
+   "root": 53,
+   "cents": 0.0,
+   "layer": 0,
+   "layers": 2,
+   "file": "000.m4a"
+  },
+  {
+   "root": 53,
+   "cents": 0.0,
+   "layer": 1,
+   "layers": 2,
+   "file": "001.m4a"
+  },
+  {
+   "root": 57,
+   "cents": -1.1,
+   "layer": 0,
+   "layers": 2,
+   "file": "002.m4a"
+  },
+  {
+   "root": 57,
+   "cents": 0.0,
+   "layer": 1,
+   "layers": 2,
+   "file": "003.m4a"
+  },
+  {
+   "root": 60,
+   "cents": 49.9,
+   "layer": 1,
+   "layers": 2,
+   "file": "004.m4a"
+  },
+  {
+   "root": 64,
+   "cents": -0.2,
+   "layer": 1,
+   "layers": 2,
+   "file": "005.m4a"
+  },
+  {
+   "root": 67,
+   "cents": 0.1,
+   "layer": 0,
+   "layers": 2,
+   "file": "006.m4a"
+  },
+  {
+   "root": 67,
+   "cents": 0.1,
+   "layer": 1,
+   "layers": 2,
+   "file": "007.m4a"
+  },
+  {
+   "root": 71,
+   "cents": -0.7,
+   "layer": 0,
+   "layers": 2,
+   "file": "008.m4a"
+  },
+  {
+   "root": 71,
+   "cents": -0.7,
+   "layer": 1,
+   "layers": 2,
+   "file": "009.m4a"
+  },
+  {
+   "root": 74,
+   "cents": 0.3,
+   "layer": 0,
+   "layers": 2,
+   "file": "010.m4a"
+  },
+  {
+   "root": 74,
+   "cents": 0.2,
+   "layer": 1,
+   "layers": 2,
+   "file": "011.m4a"
+  },
+  {
+   "root": 77,
+   "cents": 0.4,
+   "layer": 0,
+   "layers": 2,
+   "file": "012.m4a"
+  },
+  {
+   "root": 77,
+   "cents": 0.3,
+   "layer": 1,
+   "layers": 2,
+   "file": "013.m4a"
+  },
+  {
+   "root": 81,
+   "cents": 1.0,
+   "layer": 0,
+   "layers": 2,
+   "file": "014.m4a"
+  },
+  {
+   "root": 81,
+   "cents": 1.0,
+   "layer": 1,
+   "layers": 2,
+   "file": "015.m4a"
+  },
+  {
+   "root": 84,
+   "cents": 0.5,
+   "layer": 0,
+   "layers": 2,
+   "file": "016.m4a"
+  },
+  {
+   "root": 84,
+   "cents": 0.4,
+   "layer": 1,
+   "layers": 2,
+   "file": "017.m4a"
+  },
+  {
+   "root": 88,
+   "cents": 0.1,
+   "layer": 0,
+   "layers": 2,
+   "file": "018.m4a"
+  },
+  {
+   "root": 88,
+   "cents": 0.0,
+   "layer": 1,
+   "layers": 2,
+   "file": "019.m4a"
+  }
+ ]
+}

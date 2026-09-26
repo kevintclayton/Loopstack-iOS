@@ -241,7 +241,7 @@ struct TransportView: View {
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: 6) {
           ForEach(InstrumentPreset.allCases) { p in
-            pill(p.label, on: engine.preset == p) { engine.setPreset(p) }
+            pill(p.label, on: engine.preset == p && engine.acousticId == nil) { engine.setPreset(p) }
           }
         }
       }
@@ -509,7 +509,7 @@ struct InstrumentView: View {
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: 6) {
           ForEach(InstrumentPreset.allCases) { p in
-            pill(p.label, on: engine.preset == p && engine.activeSoundId == nil && engine.inputMode != "sampler") {
+            pill(p.label, on: engine.preset == p && engine.activeSoundId == nil && engine.inputMode != "sampler" && engine.acousticId == nil) {
               engine.setPreset(p)
             }
           }
@@ -529,6 +529,10 @@ struct InstrumentView: View {
             .background(LS.surface2, in: Capsule())
           }
         }
+      }
+
+      if engine.inputMode == "keys" {
+        acousticRow
       }
 
       // Pads sit right under the sounds, close to the transport above, so recording
@@ -576,6 +580,25 @@ struct InstrumentView: View {
     }
   }
 
+  /// Sampled acoustic instruments: pianos, strings, winds, mallets.
+  private var acousticRow: some View {
+    ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 6) {
+        Text("ACOUSTIC")
+          .font(.system(size: 11, weight: .medium))
+          .tracking(1.4)
+          .foregroundStyle(LS.subtle)
+          .padding(.trailing, 2)
+        ForEach(AcousticInstrument.catalog, id: \.id) { item in
+          pill(engine.acousticLoading == item.id ? "\(item.name)…" : item.name,
+               on: engine.acousticId == item.id || engine.acousticLoading == item.id) {
+            engine.setAcoustic(item.id)
+          }
+        }
+      }
+    }
+  }
+
   private var synthDisclosure: some View {
     VStack(alignment: .leading, spacing: 12) {
       #if DEBUG
@@ -590,7 +613,7 @@ struct InstrumentView: View {
             .font(.system(size: 11, weight: .medium))
             .tracking(1.6)
             .foregroundStyle(LS.subtle)
-          Text(synthOpen ? "Hide sliders" : "Osc, filter, space")
+          Text(synthOpen ? "Hide sliders" : (engine.acousticId == nil ? "Osc, filter, space" : "Space and tape"))
             .font(.system(size: 13))
             .foregroundStyle(LS.muted)
           Spacer()
@@ -606,6 +629,8 @@ struct InstrumentView: View {
       .accessibilityLabel(synthOpen ? "Hide synth controls" : "Show synth controls")
 
       if synthOpen {
+        // Acoustic instruments keep level, space and tape; the synth's own controls hide.
+        if engine.acousticId == nil {
         Text("OSC 1")
           .font(.system(size: 11, weight: .medium))
           .tracking(1.4)
@@ -646,20 +671,34 @@ struct InstrumentView: View {
         if engine.instrumentWave == .fm || engine.instrumentWave2 == .fm {
           FxRow(label: "FM", value: engine.instrumentFM, display: "\(Int(engine.instrumentFM * 100))", onChange: engine.setInstrumentFM)
         }
-        FxStrip(
-          name: "Keys",
-          vol: engine.instrumentGain, pan: engine.instrumentPan,
-          delay: engine.instrumentDelay, reverb: engine.instrumentReverb,
-          onVol: engine.setInstrumentGain, onPan: engine.setInstrumentPan,
-          onDelay: engine.setInstrumentDelay, onReverb: engine.setInstrumentReverb,
-          extra: ("Drift", engine.instrumentDrift, engine.setInstrumentDrift),
-          extra2: ("Glitch", engine.instrumentGlitch, engine.setInstrumentGlitch)
-        )
+        }
+        if engine.acousticId == nil {
+          FxStrip(
+            name: "Keys",
+            vol: engine.instrumentGain, pan: engine.instrumentPan,
+            delay: engine.instrumentDelay, reverb: engine.instrumentReverb,
+            onVol: engine.setInstrumentGain, onPan: engine.setInstrumentPan,
+            onDelay: engine.setInstrumentDelay, onReverb: engine.setInstrumentReverb,
+            extra: ("Drift", engine.instrumentDrift, engine.setInstrumentDrift),
+            extra2: ("Glitch", engine.instrumentGlitch, engine.setInstrumentGlitch)
+          )
+        } else {
+          // Drift and Glitch act on the synth only.
+          FxStrip(
+            name: "Keys",
+            vol: engine.instrumentGain, pan: engine.instrumentPan,
+            delay: engine.instrumentDelay, reverb: engine.instrumentReverb,
+            onVol: engine.setInstrumentGain, onPan: engine.setInstrumentPan,
+            onDelay: engine.setInstrumentDelay, onReverb: engine.setInstrumentReverb
+          )
+        }
         FxRow(label: "Tune", value: Float((engine.instrumentTune - 428) / 24), display: "\(Int(engine.instrumentTune))hz") { v in
           engine.setInstrumentTune(428 + Double(v) * 24)
         }
+        if engine.acousticId == nil {
         FxRow(label: "Ring", value: engine.instrumentRing, display: "\(Int(engine.instrumentRing * 100))", onChange: engine.setInstrumentRing)
         FxRow(label: "Rel", value: engine.instrumentRelease, display: releaseLabel(engine.instrumentRelease), onChange: engine.setInstrumentRelease)
+        }
         FxRow(label: "Tape", value: engine.instrumentTape, display: "\(Int(engine.instrumentTape * 100))", onChange: engine.setInstrumentTape)
         FxRow(label: "Wear", value: engine.instrumentWear, display: "\(Int(engine.instrumentWear * 100))", onChange: engine.setInstrumentWear)
       }

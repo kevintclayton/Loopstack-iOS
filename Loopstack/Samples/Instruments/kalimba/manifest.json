@@ -1,0 +1,113 @@
+{
+ "id": "kalimba",
+ "name": "Kalimba",
+ "release": 0.25,
+ "loop": false,
+ "zones": [
+  {
+   "root": 59,
+   "cents": 36.0,
+   "layer": 0,
+   "layers": 1,
+   "file": "000.m4a"
+  },
+  {
+   "root": 61,
+   "cents": 33.7,
+   "layer": 0,
+   "layers": 1,
+   "file": "001.m4a"
+  },
+  {
+   "root": 63,
+   "cents": -12.3,
+   "layer": 0,
+   "layers": 1,
+   "file": "002.m4a"
+  },
+  {
+   "root": 63,
+   "cents": -5.9,
+   "layer": 0,
+   "layers": 1,
+   "file": "003.m4a"
+  },
+  {
+   "root": 66,
+   "cents": 36.3,
+   "layer": 0,
+   "layers": 1,
+   "file": "004.m4a"
+  },
+  {
+   "root": 66,
+   "cents": 43.4,
+   "layer": 0,
+   "layers": 1,
+   "file": "005.m4a"
+  },
+  {
+   "root": 68,
+   "cents": 40.5,
+   "layer": 0,
+   "layers": 1,
+   "file": "006.m4a"
+  },
+  {
+   "root": 68,
+   "cents": 34.9,
+   "layer": 0,
+   "layers": 1,
+   "file": "007.m4a"
+  },
+  {
+   "root": 71,
+   "cents": 8.4,
+   "layer": 0,
+   "layers": 1,
+   "file": "008.m4a"
+  },
+  {
+   "root": 71,
+   "cents": 28.7,
+   "layer": 0,
+   "layers": 1,
+   "file": "009.m4a"
+  },
+  {
+   "root": 73,
+   "cents": 6.8,
+   "layer": 0,
+   "layers": 1,
+   "file": "010.m4a"
+  },
+  {
+   "root": 75,
+   "cents": 0.0,
+   "layer": 0,
+   "layers": 1,
+   "file": "011.m4a"
+  },
+  {
+   "root": 78,
+   "cents": 41.7,
+   "layer": 0,
+   "layers": 1,
+   "file": "012.m4a"
+  },
+  {
+   "root": 81,
+   "cents": 0.0,
+   "layer": 0,
+   "layers": 1,
+   "file": "013.m4a"
+  },
+  {
+   "root": 83,
+   "cents": 0.0,
+   "layer": 0,
+   "layers": 1,
+   "file": "014.m4a"
+  }
+ ]
+}

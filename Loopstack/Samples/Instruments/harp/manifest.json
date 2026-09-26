@@ -1,0 +1,169 @@
+{
+ "id": "harp",
+ "name": "Harp",
+ "release": 0.5,
+ "loop": false,
+ "zones": [
+  {
+   "root": 28,
+   "cents": -12.6,
+   "layer": 2,
+   "layers": 3,
+   "file": "000.m4a"
+  },
+  {
+   "root": 31,
+   "cents": -21.0,
+   "layer": 0,
+   "layers": 3,
+   "file": "001.m4a"
+  },
+  {
+   "root": 35,
+   "cents": -12.2,
+   "layer": 1,
+   "layers": 3,
+   "file": "002.m4a"
+  },
+  {
+   "root": 38,
+   "cents": -1.5,
+   "layer": 1,
+   "layers": 3,
+   "file": "003.m4a"
+  },
+  {
+   "root": 41,
+   "cents": -5.9,
+   "layer": 1,
+   "layers": 3,
+   "file": "004.m4a"
+  },
+  {
+   "root": 45,
+   "cents": -0.7,
+   "layer": 1,
+   "layers": 3,
+   "file": "005.m4a"
+  },
+  {
+   "root": 48,
+   "cents": -1.2,
+   "layer": 1,
+   "layers": 3,
+   "file": "006.m4a"
+  },
+  {
+   "root": 52,
+   "cents": -1.2,
+   "layer": 1,
+   "layers": 3,
+   "file": "007.m4a"
+  },
+  {
+   "root": 55,
+   "cents": -2.7,
+   "layer": 1,
+   "layers": 3,
+   "file": "008.m4a"
+  },
+  {
+   "root": 59,
+   "cents": -7.9,
+   "layer": 1,
+   "layers": 3,
+   "file": "009.m4a"
+  },
+  {
+   "root": 62,
+   "cents": -10.7,
+   "layer": 1,
+   "layers": 3,
+   "file": "010.m4a"
+  },
+  {
+   "root": 65,
+   "cents": -0.6,
+   "layer": 1,
+   "layers": 3,
+   "file": "011.m4a"
+  },
+  {
+   "root": 69,
+   "cents": -10.1,
+   "layer": 1,
+   "layers": 3,
+   "file": "012.m4a"
+  },
+  {
+   "root": 72,
+   "cents": -10.6,
+   "layer": 1,
+   "layers": 3,
+   "file": "013.m4a"
+  },
+  {
+   "root": 76,
+   "cents": -10.8,
+   "layer": 1,
+   "layers": 3,
+   "file": "014.m4a"
+  },
+  {
+   "root": 79,
+   "cents": -5.8,
+   "layer": 1,
+   "layers": 3,
+   "file": "015.m4a"
+  },
+  {
+   "root": 83,
+   "cents": -6.9,
+   "layer": 1,
+   "layers": 3,
+   "file": "016.m4a"
+  },
+  {
+   "root": 86,
+   "cents": -7.3,
+   "layer": 1,
+   "layers": 3,
+   "file": "017.m4a"
+  },
+  {
+   "root": 89,
+   "cents": -5.1,
+   "layer": 1,
+   "layers": 3,
+   "file": "018.m4a"
+  },
+  {
+   "root": 93,
+   "cents": -17.0,
+   "layer": 1,
+   "layers": 3,
+   "file": "019.m4a"
+  },
+  {
+   "root": 95,
+   "cents": -9.7,
+   "layer": 1,
+   "layers": 3,
+   "file": "020.m4a"
+  },
+  {
+   "root": 98,
+   "cents": -5.8,
+   "layer": 2,
+   "layers": 3,
+   "file": "021.m4a"
+  },
+  {
+   "root": 101,
+   "cents": -27.1,
+   "layer": 2,
+   "layers": 3,
+   "file": "022.m4a"
+  }
+ ]
+}

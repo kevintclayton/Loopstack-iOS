@@ -297,6 +297,41 @@ final class LoopEngine: ObservableObject {
 
   var drumName: String { DrumLibrary.find(drumId).name }
 
+  /// The acoustic instrument playing the keys (nil = the synth), and one being loaded.
+  @Published var acousticId: String?
+  @Published var acousticLoading: String?
+
+  /// Picks an acoustic instrument for the keys, or nil to go back to the synth. Loading
+  /// decodes its recordings off the main thread; the synth keeps playing until it's ready.
+  func setAcoustic(_ id: String?) {
+    guard id != acousticId else { return }
+    if let id {
+      if playSampler { setInputMode("keys") }
+      acousticLoading = id
+      let player = acousticPlayer
+      Task.detached(priority: .userInitiated) {
+        let inst = AcousticInstrument.load(id)
+        await MainActor.run {
+          guard self.acousticLoading == id else { return }  // another pick came after
+          self.acousticLoading = nil
+          guard let inst else { return }
+          self.liveSynth.allOff()
+          player.setInstrument(inst)
+          self.acousticId = id
+          self.acousticActive.value = true
+          self.pushArp()
+        }
+      }
+    } else {
+      acousticLoading = nil
+      acousticPlayer.allOff()
+      acousticPlayer.setInstrument(nil)
+      acousticId = nil
+      acousticActive.value = false
+      pushArp()
+    }
+  }
+
   /// Connected MIDI sources' names, and the notes held on a MIDI keyboard (to light pads).
   @Published var midiDevices: [String] = []
   @Published var midiHeld: Set<Int> = []
@@ -381,6 +416,9 @@ final class LoopEngine: ObservableObject {
   private let captureState = CaptureState()
   private let liveSynth = LiveSynth()
   private let liveArp = LiveArp()
+  // Acoustic instruments (sampled pianos, strings, winds, mallets)
+  private let acousticPlayer = AcousticPlayer()
+  private let acousticActive = LockedFlag()
   // MIDI keyboards
   private let midiIn = MIDIInput()
   private var midiRouter: MIDIRouter?
@@ -432,14 +470,21 @@ final class LoopEngine: ObservableObject {
   private func startMIDI() {
     let synth = liveSynth
     let direct = midiDirect
+    let acoustic = acousticPlayer
+    let acousticOn = acousticActive
     let router = MIDIRouter(
       isDirect: { direct.value },
       directOn: { note, vel in
-        synth.noteOn(midi: note, velocity: vel, steal: true)
+        if acousticOn.value {
+          acoustic.noteOn(midi: note, velocity: vel)
+        } else {
+          synth.noteOn(midi: note, velocity: vel, steal: true)
+        }
         DispatchQueue.main.async { [weak self] in self?.midiHeld.insert(note) }
       },
       directOff: { note in
         synth.noteOff(midi: note)
+        acoustic.noteOff(midi: note)
         DispatchQueue.main.async { [weak self] in self?.midiHeld.remove(note) }
       },
       engineOn: { note, vel in
@@ -460,6 +505,7 @@ final class LoopEngine: ObservableObject {
       modWheel: { synth.modWheel = $0 },
       panic: {
         synth.allOff()
+        acoustic.allOff()
         DispatchQueue.main.async { [weak self] in
           guard let self else { return }
           self.liveSampler.allOff()
@@ -727,7 +773,7 @@ final class LoopEngine: ObservableObject {
 
     liveSynth.sampleRate = format.sampleRate
     liveLayers.setClock(start: 0, dur: loopDuration, sampleRate: format.sampleRate)
-    let node = AudioGraph.synthNode(format: format, synth: liveSynth, sampler: liveSampler, tape: tapeSim, arp: liveArp, clock: transportClock, outRate: format.sampleRate)
+    let node = AudioGraph.synthNode(format: format, synth: liveSynth, sampler: liveSampler, acoustic: acousticPlayer, tape: tapeSim, arp: liveArp, clock: transportClock, outRate: format.sampleRate)
     engine.attach(node)
     engine.connect(node, to: instMixer, format: format)
     synthNode = node
@@ -863,7 +909,12 @@ final class LoopEngine: ObservableObject {
     liveSynth.release = InstrumentPatch.releaseTau(v)
   }
   func setInstrumentGlitch(_ v: Float) { instrumentGlitch = v; rememberPatch(); liveSynth.glitch = v }
-  func setInstrumentTune(_ hz: Double) { instrumentTune = min(452, max(428, hz)); rememberPatch(); liveSynth.a4 = instrumentTune }
+  func setInstrumentTune(_ hz: Double) {
+    instrumentTune = min(452, max(428, hz))
+    rememberPatch()
+    liveSynth.a4 = instrumentTune
+    acousticPlayer.setTuning(a4: instrumentTune)
+  }
   func setInstrumentOctave(_ n: Int) { instrumentOctave = min(3, max(-3, n)); rememberPatch() }
 
   func setMasterGain(_ v: Float) { masterGain = v; applyGains() }
@@ -946,6 +997,7 @@ final class LoopEngine: ObservableObject {
     drumsMixer.destination(forMixer: drumRoomBus, bus: drumRoomBusIndex)?.volume = min(1, max(0, drumRoom))
   }
   func setPreset(_ p: InstrumentPreset) {
+    setAcoustic(nil)
     rememberPatch()
     preset = p
     activeSoundId = nil
@@ -1032,6 +1084,7 @@ final class LoopEngine: ObservableObject {
     liveSynth.cutoff = cutoff
     liveSynth.resonance = resonance
     liveSynth.a4 = instrumentTune
+    acousticPlayer.setTuning(a4: instrumentTune)
     liveSynth.drift = instrumentDrift
     liveSynth.ring = instrumentRing
     liveSynth.release = InstrumentPatch.releaseTau(instrumentRelease)
@@ -1440,7 +1493,8 @@ final class LoopEngine: ObservableObject {
       bpm: Double(bpm),
       transport: running,
       freeOrigin: arpOrigin,
-      retrigger: retrigger
+      retrigger: retrigger,
+      acoustic: acousticId != nil
     )
   }
 
@@ -1503,6 +1557,10 @@ final class LoopEngine: ObservableObject {
       liveSampler.noteOn(midi: midi, velocity: velocity)
       return
     }
+    if acousticId != nil {
+      acousticPlayer.noteOn(midi: midi, velocity: velocity)
+      return
+    }
     syncSynth()
     liveSynth.noteOn(midi: midi, velocity: velocity, steal: steal)
   }
@@ -1510,6 +1568,7 @@ final class LoopEngine: ObservableObject {
   func noteOff(_ midi: Int) {
     liveSampler.noteOff(midi: midi)
     liveSynth.noteOff(midi: midi)
+    acousticPlayer.noteOff(midi: midi)
   }
 
   /// Ask for the mic (in context, when a mic feature is used), then switch the session to
@@ -2083,6 +2142,7 @@ final class LoopEngine: ObservableObject {
     liveDrums.collect()
     liveLayers.collect()
     liveSampler.collect()
+    acousticPlayer.collect()
     if sessionRecording {
       sessionElapsed = CACurrentMediaTime() - sessionStarted
     }
@@ -3057,6 +3117,8 @@ final class LiveArp: @unchecked Sendable {
     var transport = false
     var freeOrigin: TimeInterval = 0
     var retrigger = 0
+    /// Arp notes go to the acoustic instrument instead of the synth.
+    var acoustic = false
   }
 
   private let lock = NSLock()
@@ -3080,7 +3142,10 @@ final class LiveArp: @unchecked Sendable {
 
   /// Main thread: the notes to play (in order), timing, and whether this is a fresh press
   /// (which plays at once, then continues on the grid).
-  func update(on: Bool, notes seq: [Int], division: Int, bpm: Double, transport: Bool, freeOrigin: TimeInterval, retrigger: Bool) {
+  func update(on: Bool, notes seq: [Int], division: Int, bpm: Double, transport: Bool, freeOrigin: TimeInterval, retrigger: Bool, acoustic: Bool = false) {
+    lock.lock()
+    shared.acoustic = acoustic
+    lock.unlock()
     lock.lock()
     shared.on = on
     shared.division = max(1, division)
@@ -3094,7 +3159,7 @@ final class LiveArp: @unchecked Sendable {
   }
 
   /// Render thread, before the synth renders this buffer.
-  func process(_ ts: UnsafePointer<AudioTimeStamp>?, frames: Int, clock: TransportClock, synth: LiveSynth) {
+  func process(_ ts: UnsafePointer<AudioTimeStamp>?, frames: Int, clock: TransportClock, synth: LiveSynth, acoustic: AcousticPlayer) {
     if lock.try() {
       r = shared
       // Copy the values, not the array: nothing the renderer holds is ever freed here.
@@ -3103,6 +3168,14 @@ final class LiveArp: @unchecked Sendable {
       lock.unlock()
     }
     guard r.on, !notes.isEmpty else { return }
+    let toAcoustic = r.acoustic
+    func play(_ midi: Int, _ vel: Float, _ offset: Int, _ gate: Int) {
+      if toAcoustic {
+        acoustic.renderThreadNote(midi: midi, velocity: vel, offset: offset, gate: gate)
+      } else {
+        synth.renderThreadNote(midi: midi, velocity: vel, offset: offset, gate: gate)
+      }
+    }
     let now = clock.time(ts, frames: frames)
     let sr = now.rate
     // Grid time: the beat grid while the transport runs, else from the first press.
@@ -3115,13 +3188,13 @@ final class LiveArp: @unchecked Sendable {
       lastRetrigger = r.retrigger
       let k = Int(floor(g0 / step))
       retriggeredStep = k
-      synth.renderThreadNote(midi: notes[((k % notes.count) + notes.count) % notes.count], velocity: vel, offset: 0, gate: gate)
+      play(notes[((k % notes.count) + notes.count) % notes.count], vel, 0, gate)
     }
     var k = Int(ceil(g0 / step))
     while Double(k) * step < g1 {
       if k != retriggeredStep {
         let offset = min(frames - 1, max(0, Int(((Double(k) * step - g0) * sr).rounded())))
-        synth.renderThreadNote(midi: notes[((k % notes.count) + notes.count) % notes.count], velocity: vel, offset: offset, gate: gate)
+        play(notes[((k % notes.count) + notes.count) % notes.count], vel, offset, gate)
       }
       k += 1
     }

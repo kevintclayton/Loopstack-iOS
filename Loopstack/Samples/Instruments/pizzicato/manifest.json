@@ -1,0 +1,246 @@
+{
+ "id": "pizzicato",
+ "name": "Pizzicato",
+ "release": 0.12,
+ "loop": false,
+ "zones": [
+  {
+   "root": 36,
+   "cents": -0.3,
+   "layer": 0,
+   "layers": 2,
+   "file": "000.m4a"
+  },
+  {
+   "root": 36,
+   "cents": 9.4,
+   "layer": 1,
+   "layers": 2,
+   "file": "001.m4a"
+  },
+  {
+   "root": 40,
+   "cents": 12.2,
+   "layer": 0,
+   "layers": 2,
+   "file": "002.m4a"
+  },
+  {
+   "root": 40,
+   "cents": 7.3,
+   "layer": 1,
+   "layers": 2,
+   "file": "003.m4a"
+  },
+  {
+   "root": 43,
+   "cents": -5.1,
+   "layer": 0,
+   "layers": 2,
+   "file": "004.m4a"
+  },
+  {
+   "root": 43,
+   "cents": 15.0,
+   "layer": 1,
+   "layers": 2,
+   "file": "005.m4a"
+  },
+  {
+   "root": 47,
+   "cents": -27.9,
+   "layer": 0,
+   "layers": 2,
+   "file": "006.m4a"
+  },
+  {
+   "root": 47,
+   "cents": -13.6,
+   "layer": 1,
+   "layers": 2,
+   "file": "007.m4a"
+  },
+  {
+   "root": 50,
+   "cents": 20.7,
+   "layer": 0,
+   "layers": 2,
+   "file": "008.m4a"
+  },
+  {
+   "root": 50,
+   "cents": -9.4,
+   "layer": 1,
+   "layers": 2,
+   "file": "009.m4a"
+  },
+  {
+   "root": 53,
+   "cents": 7.6,
+   "layer": 0,
+   "layers": 2,
+   "file": "010.m4a"
+  },
+  {
+   "root": 53,
+   "cents": 6.3,
+   "layer": 1,
+   "layers": 2,
+   "file": "011.m4a"
+  },
+  {
+   "root": 55,
+   "cents": 9.5,
+   "layer": 0,
+   "layers": 2,
+   "file": "012.m4a"
+  },
+  {
+   "root": 55,
+   "cents": 7.1,
+   "layer": 1,
+   "layers": 2,
+   "file": "013.m4a"
+  },
+  {
+   "root": 57,
+   "cents": 5.0,
+   "layer": 0,
+   "layers": 2,
+   "file": "014.m4a"
+  },
+  {
+   "root": 57,
+   "cents": -3.9,
+   "layer": 1,
+   "layers": 2,
+   "file": "015.m4a"
+  },
+  {
+   "root": 59,
+   "cents": 8.5,
+   "layer": 0,
+   "layers": 2,
+   "file": "016.m4a"
+  },
+  {
+   "root": 59,
+   "cents": -6.6,
+   "layer": 1,
+   "layers": 2,
+   "file": "017.m4a"
+  },
+  {
+   "root": 62,
+   "cents": 9.3,
+   "layer": 0,
+   "layers": 2,
+   "file": "018.m4a"
+  },
+  {
+   "root": 62,
+   "cents": -8.1,
+   "layer": 1,
+   "layers": 2,
+   "file": "019.m4a"
+  },
+  {
+   "root": 66,
+   "cents": -2.5,
+   "layer": 0,
+   "layers": 2,
+   "file": "020.m4a"
+  },
+  {
+   "root": 66,
+   "cents": 0.6,
+   "layer": 1,
+   "layers": 2,
+   "file": "021.m4a"
+  },
+  {
+   "root": 69,
+   "cents": 1.1,
+   "layer": 0,
+   "layers": 2,
+   "file": "022.m4a"
+  },
+  {
+   "root": 69,
+   "cents": -1.6,
+   "layer": 1,
+   "layers": 2,
+   "file": "023.m4a"
+  },
+  {
+   "root": 72,
+   "cents": 12.7,
+   "layer": 0,
+   "layers": 2,
+   "file": "024.m4a"
+  },
+  {
+   "root": 72,
+   "cents": 7.0,
+   "layer": 1,
+   "layers": 2,
+   "file": "025.m4a"
+  },
+  {
+   "root": 76,
+   "cents": 2.3,
+   "layer": 0,
+   "layers": 2,
+   "file": "026.m4a"
+  },
+  {
+   "root": 76,
+   "cents": -3.1,
+   "layer": 1,
+   "layers": 2,
+   "file": "027.m4a"
+  },
+  {
+   "root": 79,
+   "cents": -0.3,
+   "layer": 0,
+   "layers": 2,
+   "file": "028.m4a"
+  },
+  {
+   "root": 79,
+   "cents": 0.0,
+   "layer": 1,
+   "layers": 2,
+   "file": "029.m4a"
+  },
+  {
+   "root": 83,
+   "cents": -8.7,
+   "layer": 0,
+   "layers": 2,
+   "file": "030.m4a"
+  },
+  {
+   "root": 83,
+   "cents": -1.9,
+   "layer": 1,
+   "layers": 2,
+   "file": "031.m4a"
+  },
+  {
+   "root": 86,
+   "cents": 0.0,
+   "layer": 0,
+   "layers": 2,
+   "file": "032.m4a"
+  },
+  {
+   "root": 86,
+   "cents": -11.8,
+   "layer": 1,
+   "layers": 2,
+   "file": "033.m4a"
+  }
+ ]
+}
