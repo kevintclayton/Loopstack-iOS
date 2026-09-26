@@ -186,10 +186,10 @@ final class LiveLayers: @unchecked Sendable {
     _ = dead
   }
 
-  #if DEBUG
-  /// Screenshot demo only: puts a finished take in a slot, as if it had just been
-  /// recorded (it starts playing on the next transport start, from the downbeat).
-  func debugInstall(index: Int, l: [Float], r: [Float]) {
+  /// Puts a finished take in a slot, as if it had just been recorded: an opened project's
+  /// loops, and the screenshot demo. It starts on the next transport start, sample 0 on
+  /// the downbeat.
+  func install(index: Int, l: [Float], r: [Float]) {
     guard Self.slotRange.contains(index), l.count > 1, r.count == l.count else { return }
     var slot = Slot()
     slot.left = l
@@ -208,6 +208,9 @@ final class LiveLayers: @unchecked Sendable {
     lock.unlock()
     _ = dead
   }
+
+  #if DEBUG
+  func debugInstall(index: Int, l: [Float], r: [Float]) { install(index: index, l: l, r: r) }
   #endif
 
   func punchIn(buffer: AVAudioPCMBuffer, when: AVAudioTime? = nil) {

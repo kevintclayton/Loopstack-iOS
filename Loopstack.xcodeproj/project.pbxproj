@@ -27,6 +27,7 @@
 		BB0000000000000000000210 /* Song.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000200 /* Song.swift */; };
 		BB0000000000000000000230 /* IPadDesk.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000220 /* IPadDesk.swift */; };
 		BB0000000000000000000250 /* MIDIInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000240 /* MIDIInput.swift */; };
+		BB0000000000000000000290 /* Project.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000280 /* Project.swift */; };
 		BB0000000000000000000270 /* AcousticPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000260 /* AcousticPlayer.swift */; };
 /* End PBXBuildFile section */
 
@@ -53,6 +54,7 @@
 		BB0000000000000000000200 /* Song.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Song.swift; sourceTree = "<group>"; };
 		BB0000000000000000000220 /* IPadDesk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPadDesk.swift; sourceTree = "<group>"; };
 		BB0000000000000000000240 /* MIDIInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MIDIInput.swift; sourceTree = "<group>"; };
+		BB0000000000000000000280 /* Project.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Project.swift; sourceTree = "<group>"; };
 		BB0000000000000000000260 /* AcousticPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcousticPlayer.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -94,6 +96,7 @@
 				BB0000000000000000000200 /* Song.swift */,
 				BB0000000000000000000220 /* IPadDesk.swift */,
 				BB0000000000000000000240 /* MIDIInput.swift */,
+				BB0000000000000000000280 /* Project.swift */,
 				BB0000000000000000000260 /* AcousticPlayer.swift */,
 				BB0000000000000000000131 /* AudioGraph.swift */,
 				BB000000000000000000012A /* Samples */,
@@ -201,6 +204,7 @@
 				BB0000000000000000000210 /* Song.swift in Sources */,
 				BB0000000000000000000230 /* IPadDesk.swift in Sources */,
 				BB0000000000000000000250 /* MIDIInput.swift in Sources */,
+				BB0000000000000000000290 /* Project.swift in Sources */,
 				BB0000000000000000000270 /* AcousticPlayer.swift in Sources */,
 				BB000000000000000000015C /* AudioGraph.swift in Sources */,
 				BB0000000000000000000155 /* Theme.swift in Sources */,

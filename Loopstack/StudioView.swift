@@ -6,6 +6,7 @@ struct StudioView: View {
   @StateObject private var engine = LoopEngine()
   /// Stack (the live loopstack) or Song (the arranged blocks).
   @State private var showSong = false
+  @State private var showProjects = false
   /// Regular width (iPad, full screen) gets the two-column layout.
   @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -23,10 +24,15 @@ struct StudioView: View {
       }
     }
     .preferredColorScheme(.dark)
+    .sheet(isPresented: $showProjects) {
+      ProjectsView(engine: engine)
+    }
     #if DEBUG
     .task {
       // Screenshot demo: launch with `-demo stack|keys|loops|drums|song`.
       if let scene = UserDefaults.standard.string(forKey: "demo") { engine.loadDemo(scene) }
+      // Testing: `-autoopen YES` opens the studio without tapping the gate.
+      else if UserDefaults.standard.bool(forKey: "autoopen") { engine.unlock() }
     }
     #endif
   }
@@ -86,10 +92,22 @@ struct StudioView: View {
 
   private var header: some View {
     VStack(alignment: .leading, spacing: 4) {
-      Text("STUDIO LOOPER")
-        .font(.system(size: 11, weight: .medium, design: .default))
-        .tracking(2.4)
-        .foregroundStyle(LS.subtle)
+      // The open project: tap for the Projects list.
+      Button { engine.refreshProjects(); showProjects = true } label: {
+        HStack(spacing: 6) {
+          Image(systemName: "folder")
+          Text(engine.projectName.isEmpty ? "Projects" : engine.projectName)
+            .lineLimit(1)
+          Image(systemName: "chevron.down")
+            .font(.system(size: 9, weight: .semibold))
+        }
+        .font(.system(size: 12, weight: .medium))
+        .foregroundStyle(LS.muted)
+        .frame(minHeight: 28)
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("Projects: \(engine.projectName)")
       Text("Loopstack")
         .font(.system(size: 32, weight: .semibold))
         .foregroundStyle(LS.fg)
@@ -134,6 +152,92 @@ struct StudioView: View {
     }
     .disabled(engine.layers.isEmpty && !engine.drumsOn)
     .frame(maxWidth: .infinity)
+  }
+}
+
+/// Projects: open, start, rename, duplicate or delete. Everything autosaves.
+struct ProjectsView: View {
+  @ObservedObject var engine: LoopEngine
+  @Environment(\.dismiss) private var dismiss
+  @State private var renaming: ProjectInfo?
+  @State private var newName = ""
+  @State private var deleting: ProjectInfo?
+
+  var body: some View {
+    NavigationStack {
+      List {
+        Section {
+          ForEach(engine.projects) { p in
+            Button {
+              engine.openProject(p.id)
+              dismiss()
+            } label: {
+              HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                  Text(p.name)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(LS.fg)
+                  Text("\(p.loops) loop\(p.loops == 1 ? "" : "s") · \(p.modified.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.system(size: 12))
+                    .foregroundStyle(LS.muted)
+                }
+                Spacer()
+                if p.id == engine.projectId {
+                  Image(systemName: "checkmark")
+                    .foregroundStyle(LS.accent)
+                }
+              }
+              .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .listRowBackground(LS.surface)
+            .swipeActions(edge: .trailing) {
+              Button(role: .destructive) { deleting = p } label: { Label("Delete", systemImage: "trash") }
+              Button { engine.duplicateProject(p.id) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
+                .tint(LS.accent)
+            }
+            .contextMenu {
+              Button { newName = p.name; renaming = p } label: { Label("Rename", systemImage: "pencil") }
+              Button { engine.duplicateProject(p.id) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
+              Button(role: .destructive) { deleting = p } label: { Label("Delete", systemImage: "trash") }
+            }
+          }
+        } footer: {
+          Text("Projects save automatically. Long-press a project to rename, duplicate or delete it.")
+            .foregroundStyle(LS.subtle)
+        }
+      }
+      .scrollContentBackground(.hidden)
+      .background(LS.bg)
+      .navigationTitle("Projects")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button("Done") { dismiss() }
+        }
+        ToolbarItem(placement: .primaryAction) {
+          Button {
+            engine.newProject()
+            dismiss()
+          } label: {
+            Label("New", systemImage: "plus")
+          }
+        }
+      }
+      .alert("Rename project", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+        TextField("Name", text: $newName)
+        Button("Save") { if let p = renaming { engine.renameProject(p.id, to: newName) }; renaming = nil }
+        Button("Cancel", role: .cancel) { renaming = nil }
+      }
+      .alert("Delete \(deleting?.name ?? "project")?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
+        Button("Delete", role: .destructive) { if let p = deleting { engine.deleteProject(p.id) }; deleting = nil }
+        Button("Cancel", role: .cancel) { deleting = nil }
+      } message: {
+        Text("Its loops and song are deleted too. This can't be undone.")
+      }
+    }
+    .preferredColorScheme(.dark)
+    .onAppear { engine.refreshProjects() }
   }
 }
 

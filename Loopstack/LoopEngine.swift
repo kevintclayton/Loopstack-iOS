@@ -522,6 +522,7 @@ final class LoopEngine: ObservableObject {
     observeAudioLifecycle()
     ensureRunning()
     startMIDI()
+    openInitialProject()
   }
 
   // MARK: MIDI keyboards
@@ -729,6 +730,7 @@ final class LoopEngine: ObservableObject {
     lifecycleObservers.append(nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
       Task { @MainActor in
         guard let self else { return }
+        self.saveProject()
         if self.micWanted {
           if self.running { self.pause() }
           if self.songPlaying { self.stopSong() }
@@ -1068,6 +1070,12 @@ final class LoopEngine: ObservableObject {
     // acoustic instrument.
     if layering { liveSynth.allOff() } else { setAcoustic(nil) }
     rememberPatch()
+    applyPresetPatch(p)
+  }
+
+  /// Loads preset `p`'s stored patch into the controls and the synth (a project opening
+  /// uses this directly, so the patch it restored isn't overwritten first).
+  private func applyPresetPatch(_ p: InstrumentPreset) {
     preset = p
     activeSoundId = nil
     if playSampler {
@@ -1932,6 +1940,7 @@ final class LoopEngine: ObservableObject {
   /// Nothing is saved.
   func loadDemo(_ scene: String) {
     if !unlocked { unlock() }
+    clear()  // start from an empty stack (the open project may have restored loops)
     bpm = 86
     bars = 4
     let sr = format.sampleRate
@@ -2040,6 +2049,227 @@ final class LoopEngine: ObservableObject {
     return out
   }
   #endif
+
+  // MARK: Projects
+
+  /// The open project's name, and all projects (newest first) for the Projects list.
+  @Published var projectName = ""
+  @Published var projects: [ProjectInfo] = []
+  @Published var projectId = ""
+  /// A fresh project's settings: the engine's state before any project was opened.
+  private var blankState: ProjectState?
+  private var savedState: ProjectState?
+  private var lastAutosave: TimeInterval = 0
+
+  /// At launch: open the last project, or make the first one (adopting the pre-projects
+  /// song, so nothing is lost).
+  private func openInitialProject() {
+    blankState = snapshotState(name: "")
+    if let id = ProjectStore.currentId, let state = ProjectStore.load(id) {
+      open(id, state)
+    } else if let first = ProjectStore.list().first, let state = ProjectStore.load(first.id) {
+      open(first.id, state)
+    } else {
+      let id = UUID().uuidString
+      var state = blankState!
+      state.name = "My First Project"
+      ProjectStore.save(id, state)
+      ProjectStore.adoptLegacySong(into: id)
+      open(id, state)
+    }
+  }
+
+  func refreshProjects() { projects = ProjectStore.list() }
+
+  /// Everything in the stack, as saved. Loop audio is written separately.
+  private func snapshotState(name: String) -> ProjectState {
+    rememberPatch()
+    var patchesOut: [String: InstrumentPatch] = [:]
+    for (p, patch) in patches { patchesOut[p.rawValue] = patch }
+    let loops = layers.map { l in
+      LoopState(id: l.id, name: l.name, file: "\(l.id).caf", gain: l.gain, pan: l.pan, delay: l.delay,
+                reverb: l.reverb, drive: l.drive, muted: l.muted, soloed: l.soloed, reversed: l.reversed, halfSpeed: l.halfSpeed)
+    }
+    return ProjectState(
+      name: name, bpm: bpm, bars: bars, metronomeOn: metronomeOn, countInOn: countInOn,
+      drumsOn: drumsOn, jamMode: jamMode, drumKit: drumKit.rawValue, drumId: drumId,
+      drumDrive: drumDrive, drumDirt: drumDirt, drumComp: drumComp, drumVinyl: drumVinyl,
+      drumTape: drumTape, drumWear: drumWear, drumRoom: drumRoom, drumPitch: drumPitch,
+      masterGain: masterGain, metroGain: metroGain, drumsGain: drumsGain, loopsGain: loopsGain,
+      preset: preset.rawValue, patches: patchesOut, acousticId: acousticId ?? acousticLoading,
+      acousticSustains: acousticSustains, layerOn: layerOn, layerBlend: layerBlend, layerOctave: layerOctave,
+      scaleRoot: scaleRoot, scaleMode: scaleMode.rawValue, chordMode: chordMode, chordSevenths: chordSevenths,
+      arpOn: arpOn, arpLatch: arpLatch, arpDivision: arpDivision, arpMode: arpMode, arpOctaves: arpOctaves,
+      loops: loops, layerSerial: layerSerial)
+  }
+
+  /// Saves the open project if anything changed: settings to project.json, each loop's
+  /// audio once, and removes the audio of deleted loops.
+  func saveProject() {
+    guard !projectId.isEmpty, !capturing else { return }
+    let state = snapshotState(name: projectName)
+    guard state != savedState else { return }
+    let dir = ProjectStore.loopsDir(projectId)
+    for layer in layers {
+      let url = dir.appendingPathComponent("\(layer.id).caf")
+      guard !FileManager.default.fileExists(atPath: url.path) else { continue }
+      if layer.buffer.frameLength > 64, let ch = layer.buffer.floatChannelData {
+        let n = Int(layer.buffer.frameLength)
+        let l = Array(UnsafeBufferPointer(start: ch[0], count: n))
+        let r = layer.buffer.format.channelCount > 1 ? Array(UnsafeBufferPointer(start: ch[1], count: n)) : l
+        try? SongStore.write(l, r, sampleRate: layer.buffer.format.sampleRate, to: url)
+      } else if let snap = liveLayers.snapshot(index: layer.slot.index) {
+        try? SongStore.write(snap.l, snap.r, sampleRate: format.sampleRate, to: url)
+      }
+    }
+    let keep = Set(layers.map { "\($0.id).caf" })
+    for f in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] where !keep.contains(f) {
+      try? FileManager.default.removeItem(at: dir.appendingPathComponent(f))
+    }
+    ProjectStore.save(projectId, state)
+    savedState = state
+  }
+
+  /// UI tick: autosave every few seconds when something changed (not mid-take).
+  private func autosaveTick(now: TimeInterval) {
+    guard now - lastAutosave > 3 else { return }
+    lastAutosave = now
+    saveProject()
+  }
+
+  /// Makes `state` the stack: stops, clears, restores every setting and the loops.
+  private func open(_ id: String, _ state: ProjectState) {
+    if songPlaying { stopSong() }
+    stop()
+    clear()
+    projectId = id
+    projectName = state.name
+    ProjectStore.currentId = id
+    SongStore.projectFolder = ProjectStore.songDir(id)
+    songBlocks = SongStore.load()
+    // Tempo first: loops are stored at this length.
+    setBpm(state.bpm)
+    setBars(state.bars)
+    setMetronomeOn(state.metronomeOn)
+    setCountInOn(state.countInOn)
+    // Sound
+    for (k, patch) in state.patches { if let p = InstrumentPreset(rawValue: k) { patches[p] = patch } }
+    applyPresetPatch(InstrumentPreset(rawValue: state.preset) ?? .keys)
+    setScaleRoot(state.scaleRoot)
+    setScaleMode(ScaleMode(rawValue: state.scaleMode) ?? .major)
+    setChordMode(state.chordMode)
+    setChordSevenths(state.chordSevenths)
+    setArpOn(state.arpOn)
+    setArpLatch(state.arpLatch)
+    setArpDivision(state.arpDivision)
+    arpMode = state.arpMode
+    setArpOctaves(state.arpOctaves)
+    acousticSustains = state.acousticSustains
+    layerOn = state.layerOn
+    layerBlend = state.layerBlend
+    layerOctave = state.layerOctave
+    setAcoustic(state.acousticId)
+    applyLayer()
+    // Drums
+    setDrumKit(DrumKit(rawValue: state.drumKit) ?? .dusty)
+    setDrumId(state.drumId)
+    setJam(state.jamMode)
+    setDrumDrive(state.drumDrive)
+    setDrumDirt(state.drumDirt)
+    setDrumComp(state.drumComp)
+    setDrumVinyl(state.drumVinyl)
+    setDrumTape(state.drumTape)
+    setDrumWear(state.drumWear)
+    setDrumRoom(state.drumRoom)
+    drumPitch = min(12, max(-12, state.drumPitch))
+    setDrumsOn(state.drumsOn)
+    // Mix
+    setMasterGain(state.masterGain)
+    setMetroGain(state.metroGain)
+    setDrumsGain(state.drumsGain)
+    setLoopsGain(state.loopsGain)
+    // Loops: back in their slots, then their settings.
+    let fmt = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 2)!
+    for (i, ls) in state.loops.enumerated() where layerSlots.indices.contains(i) {
+      guard let buf = SongStore.read(ProjectStore.loopsDir(id).appendingPathComponent(ls.file), as: fmt),
+            let ch = buf.floatChannelData else { continue }
+      let n = Int(buf.frameLength)
+      let slot = layerSlots[i]
+      slot.busy = true
+      liveLayers.install(index: slot.index, l: Array(UnsafeBufferPointer(start: ch[0], count: n)),
+                         r: Array(UnsafeBufferPointer(start: ch[1], count: n)))
+      commitLayer(slot: slot, name: ls.name, index: slot.index, live: liveLayers, sampleRate: format.sampleRate, id: ls.id)
+      setLayerGain(ls.id, ls.gain)
+      setLayerPan(ls.id, ls.pan)
+      setLayerDelay(ls.id, ls.delay)
+      setLayerReverb(ls.id, ls.reverb)
+      setLayerDrive(ls.id, ls.drive)
+      if ls.muted { toggleMute(ls.id) }
+      if ls.soloed { toggleSolo(ls.id) }
+      if ls.reversed { toggleReverse(ls.id) }
+      if ls.halfSpeed { toggleHalfSpeed(ls.id) }
+    }
+    layerSerial = max(state.layerSerial, layers.count + 1)
+    loopLocked = !layers.isEmpty
+    savedState = snapshotState(name: state.name)
+    refreshProjects()
+  }
+
+  func openProject(_ id: String) {
+    guard id != projectId, let state = ProjectStore.load(id) else { return }
+    saveProject()
+    open(id, state)
+  }
+
+  /// A new, empty project (tempo, drums and sound back to the defaults).
+  func newProject() {
+    saveProject()
+    let id = UUID().uuidString
+    var state = blankState ?? snapshotState(name: "")
+    state.name = ProjectStore.freshName()
+    state.loops = []
+    ProjectStore.save(id, state)
+    open(id, state)
+  }
+
+  func renameProject(_ id: String, to name: String) {
+    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    if id == projectId {
+      projectName = trimmed
+      saveProject()
+    } else {
+      ProjectStore.rename(id, to: trimmed)
+    }
+    refreshProjects()
+  }
+
+  func duplicateProject(_ id: String) {
+    if id == projectId { saveProject() }
+    let base = ProjectStore.load(id)?.name ?? "Project"
+    _ = ProjectStore.duplicate(id, name: ProjectStore.freshName("\(base) copy"))
+    refreshProjects()
+  }
+
+  /// Deletes a project; deleting the open one opens the most recent other (or a new one).
+  func deleteProject(_ id: String) {
+    ProjectStore.delete(id)
+    if id == projectId {
+      projectId = ""
+      savedState = nil
+      if let next = ProjectStore.list().first, let state = ProjectStore.load(next.id) {
+        open(next.id, state)
+      } else {
+        let nid = UUID().uuidString
+        var state = blankState ?? snapshotState(name: "")
+        state.name = ProjectStore.freshName()
+        state.loops = []
+        ProjectStore.save(nid, state)
+        open(nid, state)
+      }
+    }
+    refreshProjects()
+  }
 
   // MARK: Song mode
 
@@ -2223,6 +2453,7 @@ final class LoopEngine: ObservableObject {
     }
     if sendingToSong { sendTick() }
     updateMIDIRoute()
+    autosaveTick(now: CACurrentMediaTime())
     if songPlaying {
       let p = min(songLength, max(0, CACurrentMediaTime() - songStartedAt))
       if abs(p - songPosition) > 0.02 { songPosition = p }
@@ -2323,10 +2554,10 @@ final class LoopEngine: ObservableObject {
     }
   }
 
-  private func commitLayer(slot: LayerSlot, name: String, index: Int, live: LiveLayers, sampleRate: Double) {
+  private func commitLayer(slot: LayerSlot, name: String, index: Int, live: LiveLayers, sampleRate: Double, id: String? = nil) {
     let placeholder = AudioDSP.makeBuffer(frames: 64, format: format)
     let layer = Layer(
-      id: UUID().uuidString,
+      id: id ?? UUID().uuidString,
       name: name,
       buffer: placeholder,
       reverseBuffer: placeholder,

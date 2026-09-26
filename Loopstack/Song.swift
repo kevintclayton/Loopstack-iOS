@@ -21,7 +21,11 @@ struct SongBlock: Codable, Identifiable, Equatable {
 
 /// The song on disk: an ordered index (song.json) and each block's two audio files.
 enum SongStore {
+  /// The open project's song folder (set when a project opens).
+  static var projectFolder: URL?
+
   static var folder: URL {
+    if let projectFolder { return projectFolder }
     let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     let dir = docs.appendingPathComponent("Song", isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
