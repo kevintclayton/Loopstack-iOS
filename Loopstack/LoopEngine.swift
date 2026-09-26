@@ -158,8 +158,23 @@ struct Layer: Identifiable {
   var halfSpeed = false
 }
 
+/// Values that change many times a second: playheads, take and send progress, the song
+/// position, the session timer and the limiter light. They live apart from the engine so
+/// only the few views that show them redraw, not the whole screen.
+@MainActor
+final class LiveMeters: ObservableObject {
+  @Published var position: Double = 0
+  @Published var takeStart: Double = -1
+  @Published var takeDone: Double = 0
+  @Published var songPosition: Double = 0
+  @Published var sendProgress: Double = 0
+  @Published var sessionElapsed: Double = 0
+  @Published var limiterReduction: Float = 0
+}
+
 @MainActor
 final class LoopEngine: ObservableObject {
+  let meters = LiveMeters()
   @Published var unlocked = false
   @Published var status: TransportStatus = .idle
   @Published var bpm: Int = 96
@@ -225,13 +240,25 @@ final class LoopEngine: ObservableObject {
   @Published var sessionRecording = false
   /// The take in progress: where in the loop it began (0..<1, -1 before it starts) and
   /// how much of the loop it has captured (0...1).
-  @Published var takeStart: Double = -1
-  @Published var takeDone: Double = 0
+  var takeStart: Double {
+    get { meters.takeStart }
+    set { if meters.takeStart != newValue { meters.takeStart = newValue } }
+  }
+  var takeDone: Double {
+    get { meters.takeDone }
+    set { if meters.takeDone != newValue { meters.takeDone = newValue } }
+  }
   @Published var sessionReady = false
   @Published var sessionURL: URL?
   @Published var sessionDuration: Double = 0
-  @Published var sessionElapsed: Double = 0
-  @Published var position: Double = 0
+  var sessionElapsed: Double {
+    get { meters.sessionElapsed }
+    set { if meters.sessionElapsed != newValue { meters.sessionElapsed = newValue } }
+  }
+  var position: Double {
+    get { meters.position }
+    set { if meters.position != newValue { meters.position = newValue } }
+  }
   @Published var countInBeat = 0
   @Published var loopLocked = false
   @Published var instrumentTune: Double = 437
@@ -399,12 +426,18 @@ final class LoopEngine: ObservableObject {
   @Published var songBlocks: [SongBlock] = []
   /// Capturing the stack for Send to song, and how far through the cycle it is.
   @Published var sendingToSong = false
-  @Published var sendProgress: Double = 0
+  var sendProgress: Double {
+    get { meters.sendProgress }
+    set { if meters.sendProgress != newValue { meters.sendProgress = newValue } }
+  }
   /// Brief confirmation after a send ("Added Block 3").
   @Published var sendNote: String?
   @Published var songPlaying = false
   /// Seconds into the song while it plays.
-  @Published var songPosition: Double = 0
+  var songPosition: Double {
+    get { meters.songPosition }
+    set { if meters.songPosition != newValue { meters.songPosition = newValue } }
+  }
   var songLength: Double { songBlocks.reduce(0) { $0 + $1.seconds * Double($1.repeats) } }
   /// Whether there's anything in the stack to send.
   var canSendToSong: Bool { !layers.isEmpty || drumsOn }
@@ -449,7 +482,10 @@ final class LoopEngine: ObservableObject {
   private var drumRoomBusIndex: AVAudioNodeBus = 0
   private let limiterMeter = PeakMeter()
   /// dB the master limiter is currently pulling down (peak-held, falls back gently).
-  @Published var limiterReduction: Float = 0
+  var limiterReduction: Float {
+    get { meters.limiterReduction }
+    set { if meters.limiterReduction != newValue { meters.limiterReduction = newValue } }
+  }
   private let drumsPlayer = AVAudioPlayerNode()
   private let metroPlayer = AVAudioPlayerNode()
   private var voicePool: [AVAudioPlayerNode] = []

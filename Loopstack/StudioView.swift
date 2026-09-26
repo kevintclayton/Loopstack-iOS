@@ -310,6 +310,8 @@ struct TransportView: View {
   @State private var taps: [TimeInterval] = []
 
   var body: some View {
+    // Follows the playhead: only this redraws as it moves, not the whole screen.
+    Metered(meters: engine.meters) { _ in
     card {
       HStack(alignment: .bottom) {
         VStack(alignment: .leading, spacing: 4) {
@@ -426,6 +428,7 @@ struct TransportView: View {
         }
       }
     }
+    }
   }
 
   /// Send to song: captures one full pass of the stack (loops, effects, mutes, solos,
@@ -527,16 +530,18 @@ struct LayersView: View {
                 rowButton("Delete", on: false, color: LS.record) { engine.deleteLayer(layer.id) }
               }
             }
-            PeakView(
-              // The waveform as recorded; with Rev the playhead runs backwards over it
-              // (reversed playback is at the mirrored point), and a half-speed loop's
-              // playhead crosses it over two cycles.
-              peaks: layer.peaks,
-              position: layer.reversed ? 1 - engine.displayPosition(for: layer) : engine.displayPosition(for: layer),
-              running: engine.running,
-              muted: engine.isSilenced(layer),
-              recording: engine.recording && index == engine.layers.count - 1
-            )
+            Metered(meters: engine.meters) { _ in
+              PeakView(
+                // The waveform as recorded; with Rev the playhead runs backwards over it
+                // (reversed playback is at the mirrored point), and a half-speed loop's
+                // playhead crosses it over two cycles.
+                peaks: layer.peaks,
+                position: layer.reversed ? 1 - engine.displayPosition(for: layer) : engine.displayPosition(for: layer),
+                running: engine.running,
+                muted: engine.isSilenced(layer),
+                recording: engine.recording && index == engine.layers.count - 1
+              )
+            }
             FxStrip(
               name: layer.name,
               vol: layer.gain, pan: layer.pan,
@@ -1194,7 +1199,7 @@ struct MixView: View {
           .font(.system(size: 18, weight: .semibold))
           .foregroundStyle(LS.fg)
         Spacer()
-        LimiterLight(reduction: engine.limiterReduction)
+        Metered(meters: engine.meters) { m in LimiterLight(reduction: m.limiterReduction) }
       }
       mix("Master", engine.masterGain) { engine.setMasterGain($0) }
       mix("Keys", engine.instrumentGain) { engine.setInstrumentGain($0) }
@@ -1309,6 +1314,8 @@ struct SongView: View {
   var backToStack: () -> Void
 
   var body: some View {
+    // Follows the playhead: only this redraws as it moves, not the whole screen.
+    Metered(meters: engine.meters) { _ in
     card {
       HStack {
         VStack(alignment: .leading, spacing: 4) {
@@ -1370,6 +1377,7 @@ struct SongView: View {
         .buttonStyle(.plain)
         .disabled(engine.songBlocks.isEmpty)
       }
+    }
     }
   }
 
@@ -1470,6 +1478,14 @@ struct SongView: View {
     let t = Int(s.rounded())
     return String(format: "%d:%02d", t / 60, t % 60)
   }
+}
+
+/// Redraws only its content when the fast meters change (playheads, progress, the
+/// limiter light), so the rest of the screen doesn't redraw twenty times a second.
+struct Metered<Content: View>: View {
+  @ObservedObject var meters: LiveMeters
+  @ViewBuilder var content: (LiveMeters) -> Content
+  var body: some View { content(meters) }
 }
 
 struct LoopRuler: View {
