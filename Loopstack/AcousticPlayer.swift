@@ -132,6 +132,8 @@ final class AcousticPlayer: @unchecked Sendable {
   private var sharedA4: Double = 440
   /// Sustain: multiplies the instrument's natural release (1 = natural).
   private var sharedReleaseScale: Double = 1
+  /// Layer blend: this instrument's share of the mix (1 = alone).
+  private var sharedMix: Float = 1
   private var pending: [Event] = []
   private var gen: UInt64 = 0
   private var seenGen: UInt64 = 0
@@ -141,6 +143,8 @@ final class AcousticPlayer: @unchecked Sendable {
   private var inst: AcousticInstrument?
   private var a4: Double = 440
   private var releaseScale: Double = 1
+  private var mixTarget: Float = 1
+  private var mixNow: Float = 1
   private var renderGen: UInt64 = 0
   private var inbox: [Event] = []
   private var voices: [Voice] = []
@@ -169,6 +173,14 @@ final class AcousticPlayer: @unchecked Sendable {
   func setTuning(a4 hz: Double) {
     lock.lock()
     sharedA4 = max(400, min(480, hz))
+    lock.unlock()
+  }
+
+  /// Main thread: the instrument's level in a layer with the synth (glided, so moving
+  /// Blend never steps).
+  func setMix(_ gain: Float) {
+    lock.lock()
+    sharedMix = max(0, min(1, gain))
     lock.unlock()
   }
 
@@ -277,12 +289,17 @@ final class AcousticPlayer: @unchecked Sendable {
       }
       a4 = sharedA4
       releaseScale = sharedReleaseScale
+      mixTarget = sharedMix
       swap(&pending, &inbox)
       lock.unlock()
       for e in inbox { apply(e) }
       inbox.removeAll(keepingCapacity: true)
     }
+    // Glide the blend over ~20 ms whether or not anything is sounding.
+    let mixStart = mixNow
+    mixNow += (mixTarget - mixNow) * min(1, Float(frames) / Float(0.02 * outRate))
     guard let inst, !voices.isEmpty else { return }
+    let mixStep = (mixNow - mixStart) / Float(frames)
     let sr = outRate
     let attack = 1 / (0.003 * sr)
     let releaseCoef = exp(-1 / (max(0.02, inst.release * releaseScale) / 4.6 * sr))
@@ -321,7 +338,7 @@ final class AcousticPlayer: @unchecked Sendable {
             i1 = i0 + 1
           }
           let frac = Float(v.pos - Double(i0))
-          let s = (d[i0] + (d[i1] - d[i0]) * frac) * v.gain * Float(v.env)
+          let s = (d[i0] + (d[i1] - d[i0]) * frac) * v.gain * Float(v.env) * (mixStart + mixStep * Float(f))
           left[f] += s
           if right != left { right[f] += s }
           let pm = pitchModFrames > 0 ? pitchMod![min(f, pitchModFrames - 1)] : 1

@@ -241,7 +241,7 @@ struct TransportView: View {
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: 6) {
           ForEach(InstrumentPreset.allCases) { p in
-            pill(p.label, on: engine.preset == p && engine.acousticId == nil) { engine.setPreset(p) }
+            pill(p.label, on: engine.preset == p && (engine.acousticId == nil || engine.layering)) { engine.setPreset(p) }
           }
         }
       }
@@ -509,7 +509,7 @@ struct InstrumentView: View {
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: 6) {
           ForEach(InstrumentPreset.allCases) { p in
-            pill(p.label, on: engine.preset == p && engine.activeSoundId == nil && engine.inputMode != "sampler" && engine.acousticId == nil) {
+            pill(p.label, on: engine.preset == p && engine.activeSoundId == nil && engine.inputMode != "sampler" && (engine.acousticId == nil || engine.layering)) {
               engine.setPreset(p)
             }
           }
@@ -580,6 +580,12 @@ struct InstrumentView: View {
     }
   }
 
+  /// The Blend readout: acoustic / synth shares, e.g. "60 / 40".
+  private var blendLabel: String {
+    let synth = Int((engine.layerBlend * 100).rounded())
+    return "\(100 - synth) / \(synth)"
+  }
+
   /// The Sustain readout: seconds a note rings after key up, "pedal" at the top.
   private var sustainLabel: String {
     let v = engine.acousticSustain
@@ -598,10 +604,15 @@ struct InstrumentView: View {
           .tracking(1.4)
           .foregroundStyle(LS.subtle)
           .padding(.trailing, 2)
+        if engine.acousticId != nil {
+          // Layer: the synth sound plays along (pick it with the sound pills above).
+          pill("+ Synth", on: engine.layerOn) { engine.setLayerOn(!engine.layerOn) }
+        }
         ForEach(AcousticInstrument.catalog, id: \.id) { item in
           pill(engine.acousticLoading == item.id ? "\(item.name)…" : item.name,
                on: engine.acousticId == item.id || engine.acousticLoading == item.id) {
-            engine.setAcoustic(item.id)
+            // Tapping the selected instrument again goes back to the synth.
+            engine.setAcoustic(engine.acousticId == item.id ? nil : item.id)
           }
         }
       }
@@ -622,7 +633,7 @@ struct InstrumentView: View {
             .font(.system(size: 11, weight: .medium))
             .tracking(1.6)
             .foregroundStyle(LS.subtle)
-          Text(synthOpen ? "Hide sliders" : (engine.acousticId == nil ? "Osc, filter, space" : "Space and tape"))
+          Text(synthOpen ? "Hide sliders" : (engine.acousticId == nil ? "Osc, filter, space" : (engine.layering ? "Blend, synth, space" : "Space and tape")))
             .font(.system(size: 13))
             .foregroundStyle(LS.muted)
           Spacer()
@@ -639,7 +650,7 @@ struct InstrumentView: View {
 
       if synthOpen {
         // Acoustic instruments keep level, space and tape; the synth's own controls hide.
-        if engine.acousticId == nil {
+        if engine.acousticId == nil || engine.layering {
         Text("OSC 1")
           .font(.system(size: 11, weight: .medium))
           .tracking(1.4)
@@ -681,7 +692,7 @@ struct InstrumentView: View {
           FxRow(label: "FM", value: engine.instrumentFM, display: "\(Int(engine.instrumentFM * 100))", onChange: engine.setInstrumentFM)
         }
         }
-        if engine.acousticId == nil {
+        if engine.acousticId == nil || engine.layering {
           FxStrip(
             name: "Keys",
             vol: engine.instrumentGain, pan: engine.instrumentPan,
@@ -708,7 +719,20 @@ struct InstrumentView: View {
           // Acoustic: how long notes ring after you let go; far right is pedal down.
           FxRow(label: "Sustain", value: engine.acousticSustain, display: sustainLabel) { engine.setAcousticSustain($0) }
         }
-        if engine.acousticId == nil {
+        if engine.layering {
+          // Layer: the balance between the two, and the synth's octave.
+          FxRow(label: "Blend", value: engine.layerBlend, display: blendLabel) { engine.setLayerBlend($0) }
+          HStack(spacing: 6) {
+            Text("SYNTH OCT")
+              .font(.system(size: 11, weight: .medium))
+              .tracking(1.2)
+              .foregroundStyle(LS.subtle)
+            ForEach([-1, 0, 1], id: \.self) { n in
+              pill(n == 0 ? "0" : String(format: "%+d", n), on: engine.layerOctave == n) { engine.setLayerOctave(n) }
+            }
+          }
+        }
+        if engine.acousticId == nil || engine.layering {
         FxRow(label: "Ring", value: engine.instrumentRing, display: "\(Int(engine.instrumentRing * 100))", onChange: engine.setInstrumentRing)
         FxRow(label: "Rel", value: engine.instrumentRelease, display: releaseLabel(engine.instrumentRelease), onChange: engine.setInstrumentRelease)
         }

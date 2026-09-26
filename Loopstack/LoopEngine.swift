@@ -307,6 +307,50 @@ final class LoopEngine: ObservableObject {
   /// Natural release of the loaded instrument (seconds), for the Sustain readout.
   @Published var acousticNaturalRelease: Double = 0.3
 
+  // MARK: Layer (acoustic + synth)
+
+  /// The synth plays along with the acoustic instrument, at `layerBlend`, shifted by
+  /// `layerOctave`. Off when no acoustic instrument is selected.
+  @Published var layerOn = false
+  /// 0 = the acoustic instrument alone ... 0.5 = both equally ... 1 = the synth alone.
+  @Published var layerBlend: Float = 0.5
+  @Published var layerOctave = 0
+  var layering: Bool { layerOn && acousticId != nil }
+
+  func setLayerOn(_ on: Bool) {
+    liveSynth.allOff()
+    layerOn = on
+    if on { syncSynth() }
+    applyLayer()
+  }
+
+  func setLayerBlend(_ v: Float) {
+    layerBlend = min(1, max(0, v))
+    applyLayer()
+  }
+
+  func setLayerOctave(_ n: Int) {
+    liveSynth.allOff()  // held notes were started at the old octave
+    layerOctave = min(1, max(-1, n))
+    applyLayer()
+  }
+
+  /// Equal-power blend (the sum stays as loud as either sound alone), and the flags the
+  /// MIDI thread and the arp read.
+  private func applyLayer() {
+    let b = Double(layerBlend)
+    if layering {
+      acousticPlayer.setMix(Float(cos(b * .pi / 2)))
+      liveSynth.mixGain = Float(sin(b * .pi / 2))
+    } else {
+      acousticPlayer.setMix(1)
+      liveSynth.mixGain = 1
+    }
+    layerActive.value = layering
+    layerShift.value = layering ? layerOctave * 12 : 0
+    pushArp()
+  }
+
   func setAcousticSustain(_ v: Float) {
     acousticSustain = v
     if let id = acousticId { acousticSustains[id] = v }
@@ -332,6 +376,7 @@ final class LoopEngine: ObservableObject {
           self.acousticId = id
           self.acousticNaturalRelease = inst.release
           self.setAcousticSustain(self.acousticSustains[id] ?? 0.5)
+          self.applyLayer()
           self.acousticActive.value = true
           self.pushArp()
         }
@@ -342,7 +387,7 @@ final class LoopEngine: ObservableObject {
       acousticPlayer.setInstrument(nil)
       acousticId = nil
       acousticActive.value = false
-      pushArp()
+      applyLayer()
     }
   }
 
@@ -433,6 +478,9 @@ final class LoopEngine: ObservableObject {
   // Acoustic instruments (sampled pianos, strings, winds, mallets)
   private let acousticPlayer = AcousticPlayer()
   private let acousticActive = LockedFlag()
+  /// Layer: the synth plays along with the acoustic instrument (MIDI thread reads these).
+  private let layerActive = LockedFlag()
+  private let layerShift = LockedInt()
   // MIDI keyboards
   private let midiIn = MIDIInput()
   private var midiRouter: MIDIRouter?
@@ -486,11 +534,14 @@ final class LoopEngine: ObservableObject {
     let direct = midiDirect
     let acoustic = acousticPlayer
     let acousticOn = acousticActive
+    let layerOn = layerActive
+    let shift = layerShift
     let router = MIDIRouter(
       isDirect: { direct.value },
       directOn: { note, vel in
         if acousticOn.value {
           acoustic.noteOn(midi: note, velocity: vel)
+          if layerOn.value { synth.noteOn(midi: note + shift.value, velocity: vel, steal: true) }
         } else {
           synth.noteOn(midi: note, velocity: vel, steal: true)
         }
@@ -499,6 +550,8 @@ final class LoopEngine: ObservableObject {
       directOff: { note in
         synth.noteOff(midi: note)
         acoustic.noteOff(midi: note)
+        let s = shift.value
+        if s != 0 { synth.noteOff(midi: note + s) }
         DispatchQueue.main.async { [weak self] in self?.midiHeld.remove(note) }
       },
       engineOn: { note, vel in
@@ -1011,7 +1064,9 @@ final class LoopEngine: ObservableObject {
     drumsMixer.destination(forMixer: drumRoomBus, bus: drumRoomBusIndex)?.volume = min(1, max(0, drumRoom))
   }
   func setPreset(_ p: InstrumentPreset) {
-    setAcoustic(nil)
+    // While layering, a synth sound picks the layer's synth; otherwise it replaces the
+    // acoustic instrument.
+    if layering { liveSynth.allOff() } else { setAcoustic(nil) }
     rememberPatch()
     preset = p
     activeSoundId = nil
@@ -1508,7 +1563,8 @@ final class LoopEngine: ObservableObject {
       transport: running,
       freeOrigin: arpOrigin,
       retrigger: retrigger,
-      acoustic: acousticId != nil
+      acoustic: acousticId != nil,
+      layerShift: layering ? layerOctave * 12 : nil
     )
   }
 
@@ -1573,6 +1629,10 @@ final class LoopEngine: ObservableObject {
     }
     if acousticId != nil {
       acousticPlayer.noteOn(midi: midi, velocity: velocity)
+      if layering {
+        syncSynth()
+        liveSynth.noteOn(midi: midi + layerOctave * 12, velocity: velocity, steal: steal)
+      }
       return
     }
     syncSynth()
@@ -1583,6 +1643,7 @@ final class LoopEngine: ObservableObject {
     liveSampler.noteOff(midi: midi)
     liveSynth.noteOff(midi: midi)
     acousticPlayer.noteOff(midi: midi)
+    if layering, layerOctave != 0 { liveSynth.noteOff(midi: midi + layerOctave * 12) }
   }
 
   /// Ask for the mic (in context, when a mic feature is used), then switch the session to
@@ -2668,6 +2729,8 @@ final class LiveSynth: @unchecked Sendable {
     /// MIDI pitch bend, -1...1 (±2 semitones), and mod wheel, 0...1 (vibrato).
     var bend: Float = 0
     var modWheel: Float = 0
+    /// Level when layered under an acoustic instrument (1 = alone).
+    var mixGain: Float = 1
   }
 
   /// Note changes are queued for the render thread instead of editing its voices
@@ -2710,6 +2773,7 @@ final class LiveSynth: @unchecked Sendable {
   /// Frames of `pitchMod` filled for the current buffer.
   private(set) var pitchModFrames = 0
   private var bendNow = 1.0
+  private var mixNow: Double = 1
   private var vibDepth = 0.0
   private var vibPhase = 0.0
 
@@ -2778,6 +2842,10 @@ final class LiveSynth: @unchecked Sendable {
   var bend: Float {
     get { lock.lock(); defer { lock.unlock() }; return shared.bend }
     set { lock.lock(); shared.bend = newValue; paramsGen &+= 1; lock.unlock() }
+  }
+  var mixGain: Float {
+    get { lock.lock(); defer { lock.unlock() }; return shared.mixGain }
+    set { lock.lock(); shared.mixGain = newValue; paramsGen &+= 1; lock.unlock() }
   }
   var modWheel: Float {
     get { lock.lock(); defer { lock.unlock() }; return shared.modWheel }
@@ -3015,6 +3083,10 @@ final class LiveSynth: @unchecked Sendable {
     var dcl = dcBlockL
     var dcr = dcBlockR
     let out = 0.92 * Self.makeup(preset)
+    // Layer blend, glided across the buffer (~20 ms) so moving Blend never steps.
+    let mixStart = mixNow
+    mixNow += (Double(rp.mixGain) - mixNow) * min(1, Double(frames) / (0.02 * sr))
+    let mixStep = (mixNow - mixStart) / Double(frames)
     var scale = voiceScale
     for f in 0..<frames {
       // ~5 ms glide to the new per-voice level.
@@ -3026,14 +3098,15 @@ final class LiveSynth: @unchecked Sendable {
       dcl += 0.0004 * x
       let y = zL + g * (tanh(x - fb * zL) - zL)
       zL = y
-      left[f] = Float(tanh(y * 1.15) * out)
+      let mg = mixStart + mixStep * Double(f)
+      left[f] = Float(tanh(y * 1.15) * out * mg)
       if right != left {
         var xr = Double(right[f])
         xr -= dcr
         dcr += 0.0004 * xr
         let yr = zR + g * (tanh(xr - fb * zR) - zR)
         zR = yr
-        right[f] = Float(tanh(yr * 1.15) * out)
+        right[f] = Float(tanh(yr * 1.15) * out * mg)
       }
     }
     voiceScale = scale
@@ -3133,6 +3206,9 @@ final class LiveArp: @unchecked Sendable {
     var retrigger = 0
     /// Arp notes go to the acoustic instrument instead of the synth.
     var acoustic = false
+    /// ...and also to the synth, shifted, when it's layered.
+    var layer = false
+    var layerShift = 0
   }
 
   private let lock = NSLock()
@@ -3156,9 +3232,12 @@ final class LiveArp: @unchecked Sendable {
 
   /// Main thread: the notes to play (in order), timing, and whether this is a fresh press
   /// (which plays at once, then continues on the grid).
-  func update(on: Bool, notes seq: [Int], division: Int, bpm: Double, transport: Bool, freeOrigin: TimeInterval, retrigger: Bool, acoustic: Bool = false) {
+  func update(on: Bool, notes seq: [Int], division: Int, bpm: Double, transport: Bool, freeOrigin: TimeInterval, retrigger: Bool,
+              acoustic: Bool = false, layerShift: Int? = nil) {
     lock.lock()
     shared.acoustic = acoustic
+    shared.layer = layerShift != nil
+    shared.layerShift = layerShift ?? 0
     lock.unlock()
     lock.lock()
     shared.on = on
@@ -3183,9 +3262,11 @@ final class LiveArp: @unchecked Sendable {
     }
     guard r.on, !notes.isEmpty else { return }
     let toAcoustic = r.acoustic
+    let layered = r.layer, shiftBy = r.layerShift
     func play(_ midi: Int, _ vel: Float, _ offset: Int, _ gate: Int) {
       if toAcoustic {
         acoustic.renderThreadNote(midi: midi, velocity: vel, offset: offset, gate: gate)
+        if layered { synth.renderThreadNote(midi: midi + shiftBy, velocity: vel, offset: offset, gate: gate) }
       } else {
         synth.renderThreadNote(midi: midi, velocity: vel, offset: offset, gate: gate)
       }
@@ -3499,6 +3580,16 @@ final class LockedFlag: @unchecked Sendable {
   private let lock = NSLock()
   private var v = false
   var value: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return v }
+    set { lock.lock(); v = newValue; lock.unlock() }
+  }
+}
+
+/// An Int shared between the MIDI thread and the main thread.
+final class LockedInt: @unchecked Sendable {
+  private let lock = NSLock()
+  private var v = 0
+  var value: Int {
     get { lock.lock(); defer { lock.unlock() }; return v }
     set { lock.lock(); v = newValue; lock.unlock() }
   }
